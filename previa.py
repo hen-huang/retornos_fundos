@@ -26,7 +26,7 @@ try:
 except NameError:
     DADOS = Path.cwd() / "dados"
 CVM_DIR = DADOS / "cvm"
-MESES_HISTORICO = 14             # 12M completos + mês corrente
+MESES_HISTORICO = 37             # 36M completos + mês corrente (CVM publica mensais desde 2021)
 PL_MINIMO = 100e6
 DIAS_MIN_HISTORICO = 120
 
@@ -38,7 +38,14 @@ FATORES = {
     "IRFM": "IRFM11.SA",
     "IMAB": "IMAB11.SA",
     "IFIX": "XFIX11.SA",
+    "NDX": "^IXIC",            # Nasdaq Composite
+    "BRENT": "BZ=F",           # petróleo Brent (futuro)
+    "OURO": "GC=F",            # ouro (futuro)
+    "EEM": "EEM",              # ações emergentes (ETF em USD)
+    "TX_UST10": "^TNX",        # Treasury 10 anos (taxa, em % a.a.)
 }
+# Fatores defasados em 1 dia: capturam marcação em D-1 de ativos no exterior e fechamentos assíncronos.
+FATORES_DEFASADOS = ["SPX", "USD"]
 FATORES_ESTRATEGIA = {
     "Long Only":   ["IBOV", "SMLL", "SPX", "USD", "IFIX"],
     "Long Biased": ["IBOV", "SMLL", "SPX", "USD", "IFIX"],
@@ -46,6 +53,16 @@ FATORES_ESTRATEGIA = {
     "Macro":       ["IBOV", "SPX", "USD", "IRFM", "IMAB", "IFIX"],
     "Hedge Alternative": ["IBOV", "SMLL", "SPX", "USD", "IRFM", "IMAB", "IFIX"],
 }
+# Fatores adicionais: só entram nos modelos com amostra grande (>= OBS_MIN_ADICIONAIS), contra sobreajuste.
+FATORES_ADICIONAIS = {
+    "Long Only":   ["NDX", "BRENT", "OURO", "EEM", "SPX_L1", "USD_L1"],
+    "Long Biased": ["NDX", "BRENT", "OURO", "EEM", "SPX_L1", "USD_L1"],
+    "Long Short":  ["NDX", "BRENT", "EEM", "SPX_L1"],
+    "Macro":       ["TX_UST10", "BRENT", "OURO", "EEM", "SPX_L1", "USD_L1"],
+    "Hedge Alternative": ["TX_UST10", "BRENT", "OURO", "SPX_L1", "USD_L1"],
+}
+OBS_MIN_ADICIONAIS = 120           # fatores adicionais só em modelos com >= 120 obs. (6m, 12m, 24m, ew); 0 = em todos
+RIDGE_ESCALA = 10                  # ridge efetivo = RIDGE × (1 + RIDGE_ESCALA × fatores / obs.)
 # Fundos incluídos sempre, com estratégia própria (ignoram classe, PL mínimo e exclusividade).
 FUNDOS_INCLUIR = {
     "35.377.516/0001-34": "Hedge Alternative",   # Master FIM CP
@@ -61,8 +78,11 @@ ORDEM_ESTRATEGIAS = ["Long Only", "Long Biased", "Long Short", "Macro", "Hedge A
 EXTRA_CSV = DADOS / "fatores_extra.csv"
 
 # Janelas de estimação em dias úteis. A principal define confiança, ordenação e cota estimada.
-JANELAS = {"1m": 21, "2m": 42, "3m": 63, "12m": 250}
-MIN_OBS = {"1m": 15, "2m": 30, "3m": 40, "12m": 120}
+JANELAS = {"1m": 21, "2m": 42, "3m": 63, "6m": 126, "12m": 250, "24m": 500}
+MIN_OBS = {"1m": 15, "2m": 30, "3m": 40, "6m": 90, "12m": 160, "24m": 320}
+MEIA_VIDA_EW = 63                  # modelo "ew": todas as obs., peso exponencial com meia-vida de 63 dias úteis
+MIN_OBS_EW = 60
+MODELOS = list(JANELAS) + ["ew"]
 JANELA_PRINCIPAL = "comb"          # "comb" = combinação das janelas pelo erro recente
 CALIB_DIAS = 63                    # dias usados nos pesos da combinação e na calibração do IC
 CALIB_MIN = 20
@@ -125,7 +145,7 @@ def _meses(n: int, hoje: date | None = None) -> list[str]:
 
 
 def _janelas() -> list[str]:
-    return list(JANELAS)
+    return list(MODELOS)
 
 
 # Cadastro e universo
@@ -267,7 +287,25 @@ def carregar_fatores() -> tuple[pd.DataFrame, pd.Series]:
         ex["data"] = pd.to_datetime(ex["data"], dayfirst=True)
         px = px.join(ex.set_index("data").apply(pd.to_numeric, errors="coerce"), how="outer")
     cdi = pd.read_parquet(DADOS / "cdi.parquet")["CDI"]
-    return px.sort_index(), cdi.sort_index()
+    px = px.sort_index()
+    for f in FATORES_DEFASADOS:
+        if f in px:
+            px[f"{f}_L1"] = px[f].ffill().shift(1)
+    return px, cdi.sort_index()
+
+
+def fatores_visiveis(colunas) -> list[str]:
+    """Fatores de mercado de verdade (sem as colunas defasadas, que são derivadas)."""
+    return [c for c in colunas if not c.endswith("_L1")]
+
+
+def completar_agora(px: pd.DataFrame, agora: pd.Series, d_ant) -> pd.Series:
+    """Nível 'agora' das colunas defasadas = fechamento do fator no último pregão (move = retorno de ontem)."""
+    agora = agora.copy()
+    for f in FATORES_DEFASADOS:
+        if f in px and f"{f}_L1" in px:
+            agora[f"{f}_L1"] = px[f].ffill().loc[:d_ant].iloc[-1]
+    return agora
 
 
 def _transformar(niveis: pd.DataFrame) -> pd.DataFrame:
@@ -298,23 +336,47 @@ def _t_quantil(gl, nivel: float | None = None):
         return z + (z**3 + z) / (4 * gl) + (5 * z**5 + 16 * z**3 + 3 * z) / (96 * gl**2)
 
 
-def _ridge(X: np.ndarray, y: np.ndarray, lam: float):
-    """Ridge em X padronizado. Retorna α, β, R², erro anual, σ diário, média de X e V (var(β) = σ²V)."""
-    n = len(y)
-    mx, my = X.mean(0), y.mean()
-    sd = X.std(0)
+def _lam(k: int, n: float) -> float:
+    """Ridge adaptativo: mais penalização quando há muitos fatores para poucas observações."""
+    return RIDGE * (1 + RIDGE_ESCALA * k / max(n, 1))
+
+
+def _ridge_somas(N, Neff, Sx, Sy, Syy, Sxx, Sxy, lam):
+    """Ridge (X padronizado) a partir de somas ponderadas, vetorizado na 1ª dimensão.
+    Retorna α, β, σ², V (var(β) = σ²V), média de X, graus de liberdade e R²."""
+    k = Sx.shape[1]
+    lam = np.broadcast_to(np.asarray(lam, dtype=float), N.shape)
+    mx, my = Sx / N[:, None], Sy / N
+    Cxx = Sxx - N[:, None, None] * mx[:, :, None] * mx[:, None, :]
+    Cxy = Sxy - N[:, None] * mx * my[:, None]
+    sd = np.sqrt(np.clip(np.einsum("tii->ti", Cxx) / N[:, None], 0, None))
     sd[sd == 0] = 1.0
-    Z = (X - mx) / sd
-    k = Z.shape[1]
-    b = np.linalg.solve(Z.T @ Z + lam * np.eye(k), Z.T @ (y - my)) / sd
-    a = my - mx @ b
-    res = y - a - X @ b
-    sst = ((y - my) ** 2).sum()
-    r2 = 1 - (res ** 2).sum() / sst if sst > 0 else np.nan
-    sig = np.sqrt((res ** 2).sum() / max(n - k - 1, 1))
-    Xc = X - mx
-    V = np.linalg.inv(Xc.T @ Xc + lam * np.diag(sd ** 2))
-    return a, b, r2, sig * np.sqrt(252), sig, mx, V
+    eye = np.eye(k)
+    ZZ = Cxx / (sd[:, :, None] * sd[:, None, :]) + lam[:, None, None] * eye
+    b = np.linalg.solve(ZZ, (Cxy / sd)[..., None])[..., 0] / sd
+    a = my - (mx * b).sum(1)
+    sst = Syy - N * my ** 2
+    sse = np.clip(sst - 2 * (b * Cxy).sum(1) + np.einsum("ti,tij,tj->t", b, Cxx, b), 0, None)
+    g = Neff - k - 1
+    s2 = sse / N * Neff / np.maximum(g, 1)
+    V = np.linalg.inv(Cxx + lam[:, None, None] * (sd[:, :, None] ** 2) * eye) * (N / Neff)[:, None, None]
+    r2 = np.where(sst > 0, 1 - sse / np.where(sst > 0, sst, 1), np.nan)
+    return a, b, s2, V, mx, g, r2
+
+
+def _ridge(X: np.ndarray, y: np.ndarray, lam: float, w: np.ndarray | None = None):
+    """Ridge (opcionalmente ponderado). Retorna α, β, R², erro anual, σ diário, média de X, V e n efetivo."""
+    w = np.ones(len(y)) if w is None else np.asarray(w, dtype=float)
+    Xw = X * w[:, None]
+    N, Neff = np.array([w.sum()]), np.array([w.sum() ** 2 / (w ** 2).sum()])
+    a, b, s2, V, mx, g, r2 = _ridge_somas(N, Neff, Xw.sum(0)[None], np.array([(w * y).sum()]),
+                                          np.array([(w * y * y).sum()]), (Xw.T @ X)[None], (Xw.T @ y)[None], lam)
+    sig = float(np.sqrt(s2[0]))
+    return a[0], b[0], r2[0], sig * np.sqrt(252), sig, mx[0], V[0], float(Neff[0])
+
+
+def _usa_adicionais(modelo: str) -> bool:
+    return modelo == "ew" or JANELAS.get(modelo, 0) >= OBS_MIN_ADICIONAIS
 
 
 def _amostras(univ, cot, px, cdi):
@@ -333,7 +395,10 @@ def _amostras(univ, cot, px, cdi):
     for _, f in univ.iterrows():
         if f["chave"] not in lc:
             continue
-        fat = [c for c in FATORES_ESTRATEGIA[f["Estrategia"]] if c in col]
+        base = [c for c in FATORES_ESTRATEGIA[f["Estrategia"]] if c in col]
+        fat = base + [c for c in FATORES_ADICIONAIS.get(f["Estrategia"], []) if c in col and c not in base]
+        f = f.copy()
+        f["n_base"] = len(base)
         s = lc[f["chave"]].to_numpy()
         ok = np.flatnonzero(~np.isnan(s))
         if len(ok) < 2:
@@ -350,58 +415,81 @@ def _estimar_betas(univ, cot, px, cdi) -> pd.DataFrame:
     linhas = []
     for f, fat, _, _, y, X, _, est in _amostras(univ, cot, px, cdi):
         y, X = y[est], X[est]
-        for jan, n in JANELAS.items():
-            if len(y) < MIN_OBS[jan]:
-                continue
-            a, b, r2, te, sig, mx, V = _ridge(X[-n:], y[-n:], RIDGE)
-            linhas.append({"chave": f["chave"], "janela": jan, "n": min(n, len(y)),
+        for m in MODELOS:
+            cols = slice(None) if _usa_adicionais(m) else slice(0, f["n_base"])
+            fm = fat[cols]
+            if m == "ew":
+                if len(y) < MIN_OBS_EW:
+                    continue
+                idade = np.arange(len(y))[::-1]
+                w = 0.5 ** (idade / MEIA_VIDA_EW)
+                neff = w.sum() ** 2 / (w ** 2).sum()
+                a, b, r2, te, sig, mx, V, n = _ridge(X[:, cols], y, _lam(len(fm), neff), w)
+            else:
+                nj = JANELAS[m]
+                if len(y) < MIN_OBS[m]:
+                    continue
+                Xs, ys = X[-nj:, cols], y[-nj:]
+                a, b, r2, te, sig, mx, V, n = _ridge(Xs, ys, _lam(len(fm), len(ys)))
+            linhas.append({"chave": f["chave"], "janela": m, "n": int(round(n)),
                            "alfa": a, "r2": r2, "te": te, "sig": sig,
-                           "fatores": list(fat), "mx": mx.tolist(), "V": V.ravel().tolist(),
-                           **{f"b_{c}": v for c, v in zip(fat, b)}})
+                           "fatores": list(fm), "mx": mx.tolist(), "V": V.ravel().tolist(),
+                           **{f"b_{c}": v for c, v in zip(fm, b)}})
     bet = pd.DataFrame(linhas)
     _log(f"Estimados {bet['chave'].nunique():,} fundos | R² mediano: "
-         + ", ".join(f"{j} {bet.loc[bet.janela == j, 'r2'].median():.2f}" for j in JANELAS))
+         + ", ".join(f"{j} {bet.loc[bet.janela == j, 'r2'].median():.2f}" for j in MODELOS))
     return bet
 
 
 # Backtest
-def _ridge_rolante(X, y, w, n, lam, min_obs):
-    """Ridge fora da amostra: para cada obs. i, ajusta nas n últimas obs. válidas (w) anteriores a i.
-    Retorna α, β, variância de predição e graus de liberdade por obs.; NaN sem histórico."""
+def _previsao_somas(X, valido, N, Neff, Sx, Sy, Syy, Sxx, Sxy, lam):
     T, k = X.shape
-    Xw, yw = X * w[:, None], y * w
-    z = lambda a: np.concatenate([np.zeros((1,) + a.shape[1:]), np.cumsum(a, 0)])
-    cw, cx, cy, cyy = z(w.astype(float)), z(Xw), z(yw), z(yw * y)
-    cxx = z(Xw[:, :, None] * X[:, None, :])
-    cxy = z(Xw * y[:, None])
-    fim = np.arange(T)
-    ini = np.minimum(np.searchsorted(cw, np.maximum(cw[fim] - n, 0), side="left"), fim)
-    N = cw[fim] - cw[ini]
     a, vp, gl = np.full(T, np.nan), np.full(T, np.nan), np.full(T, np.nan)
     b = np.full((T, k), np.nan)
-    v = N >= min_obs
+    v = valido
     if not v.any():
         return a, b, vp, gl
-    N_ = N[v]
-    d = lambda c: c[fim][v] - c[ini][v]
-    Sx, Sy, Syy, Sxx, Sxy = d(cx), d(cy), d(cyy), d(cxx), d(cxy)
-    mx, my = Sx / N_[:, None], Sy / N_
-    Cxx = Sxx - N_[:, None, None] * mx[:, :, None] * mx[:, None, :]
-    Cxy = Sxy - N_[:, None] * mx * my[:, None]
-    sd = np.sqrt(np.clip(np.einsum("tii->ti", Cxx) / N_[:, None], 0, None))
-    sd[sd == 0] = 1.0
-    ZZ = Cxx / (sd[:, :, None] * sd[:, None, :]) + lam * np.eye(k)
-    bv = np.linalg.solve(ZZ, (Cxy / sd)[..., None])[..., 0] / sd
-    b[v] = bv
-    a[v] = my - (mx * bv).sum(1)
-    sse = (Syy - N_ * my ** 2) - 2 * (bv * Cxy).sum(1) + np.einsum("ti,tij,tj->t", bv, Cxx, bv)
-    g = N_ - k - 1
-    s2 = np.clip(sse, 0, None) / np.maximum(g, 1)
-    Vm = np.linalg.inv(Cxx + lam * (sd[:, :, None] ** 2) * np.eye(k))
+    lam = np.asarray(lam, dtype=float)
+    lam = lam[v] if lam.ndim else lam
+    av, bv, s2, V, mx, g, _ = _ridge_somas(N[v], Neff[v], Sx[v], Sy[v], Syy[v], Sxx[v], Sxy[v], lam)
+    a[v], b[v], gl[v] = av, bv, g
     q = X[v] - mx
-    vp[v] = s2 * (1 + 1 / N_ + np.einsum("ti,tij,tj->t", q, Vm, q))
-    gl[v] = g
+    vp[v] = s2 * (1 + 1 / Neff[v] + np.einsum("ti,tij,tj->t", q, V, q))
     return a, b, vp, gl
+
+
+def _ridge_rolante(X, y, w, n, lam, min_obs):
+    """Ridge fora da amostra: para cada obs. i, ajusta nas n últimas obs. válidas (w) anteriores a i."""
+    T, k = X.shape
+    w = w.astype(float)
+    Xw, yw = X * w[:, None], y * w
+    z = lambda a: np.concatenate([np.zeros((1,) + a.shape[1:]), np.cumsum(a, 0)])
+    cw, cx, cy, cyy, cxx, cxy = z(w), z(Xw), z(yw), z(yw * y), z(Xw[:, :, None] * X[:, None, :]), z(Xw * y[:, None])
+    fim = np.arange(T)
+    ini = np.minimum(np.searchsorted(cw, np.maximum(cw[fim] - n, 0), side="left"), fim)
+    d = lambda c: c[fim] - c[ini]
+    N = d(cw)
+    valido = N >= min_obs
+    Nn = np.where(N > 0, N, 1.0)
+    return _previsao_somas(X, valido, Nn, Nn, d(cx), d(cy), d(cyy), d(cxx), d(cxy), lam)
+
+
+def _ridge_ew_rolante(X, y, w, meia_vida, lam_fn, min_obs):
+    """Ridge com pesos exponenciais fora da amostra: para cada obs. i, usa todas as obs. válidas anteriores,
+    com peso 0,5^(idade/meia_vida). Somas recursivas via filtro IIR."""
+    from scipy.signal import lfilter
+    T, k = X.shape
+    w = w.astype(float)
+    dl = 0.5 ** (1 / meia_vida)
+    filt = lambda z, dd=dl: np.concatenate([np.zeros((1,) + z.shape[1:]), lfilter([1.0], [1.0, -dd], z, axis=0)[:-1]])
+    Xw, yw = X * w[:, None], y * w
+    N, N2 = filt(w), filt(w, dl ** 2)
+    Sx, Sy, Syy = filt(Xw), filt(yw), filt(yw * y)
+    Sxx, Sxy = filt(Xw[:, :, None] * X[:, None, :]), filt(Xw * y[:, None])
+    cont = np.concatenate([[0], np.cumsum(w)[:-1]])
+    Nn = np.where(N > 0, N, 1.0)
+    Neff = np.where(N2 > 0, N ** 2 / np.where(N2 > 0, N2, 1), 1.0)
+    return _previsao_somas(X, cont >= min_obs, Nn, Neff, Sx, Sy, Syy, Sxx, Sxy, lam_fn(np.maximum(Neff, 1)))
 
 
 def _rolante(df: pd.DataFrame, func: str, q: float | None = None) -> pd.DataFrame:
@@ -429,17 +517,24 @@ def _pesos(e2: pd.DataFrame, disp: pd.DataFrame) -> pd.DataFrame:
 
 
 def _backtest_fundos(univ, cot, px, cdi) -> pd.DataFrame:
-    """Prévias fora da amostra por fundo/dia e janela, combinação ponderada e IC calibrado."""
-    jans = list(JANELAS)
+    """Prévias fora da amostra por fundo/dia e modelo, combinação ponderada e IC calibrado."""
+    jans = list(MODELOS)
     out = []
     for f, fat, dt, r, y, X, c, est in _amostras(univ, cot, px, cdi):
         cols = {"data": dt, "real": r, "cdi": c, "usada_estim": est}
         P, M = {}, {}
-        for jan, n in JANELAS.items():
-            a, b, vp, gl = _ridge_rolante(X, y, est, n, RIDGE, MIN_OBS[jan])
-            P[jan] = c + (X * b).sum(1)
-            M[jan] = _t_quantil(np.nan_to_num(gl, nan=1)) * np.sqrt(vp)
-            cols[f"prev_{jan}_alfa"] = P[jan] + a
+        for m in MODELOS:
+            sel = slice(None) if _usa_adicionais(m) else slice(0, f["n_base"])
+            Xm = X[:, sel]
+            km = Xm.shape[1]
+            if m == "ew":
+                a, b, vp, gl = _ridge_ew_rolante(Xm, y, est, MEIA_VIDA_EW,
+                                                 lambda ne, km=km: RIDGE * (1 + RIDGE_ESCALA * km / ne), MIN_OBS_EW)
+            else:
+                a, b, vp, gl = _ridge_rolante(Xm, y, est, JANELAS[m], _lam(km, JANELAS[m]), MIN_OBS[m])
+            P[m] = c + (Xm * b).sum(1)
+            M[m] = _t_quantil(np.nan_to_num(gl, nan=1)) * np.sqrt(vp)
+            cols[f"prev_{m}_alfa"] = P[m] + a
         P, M = pd.DataFrame(P), pd.DataFrame(M)
         real = pd.Series(r)
         usa = pd.Series(est)
@@ -459,15 +554,15 @@ def _backtest_fundos(univ, cot, px, cdi) -> pd.DataFrame:
         for j in jans:
             cols[f"w_{j}"] = w[j].to_numpy()
         d = pd.DataFrame(cols).assign(chave=f["chave"], Estrategia=f["Estrategia"])
-        out.append(d.dropna(subset=[f"prev_{j}" for j in JANELAS]))
+        out.append(d.dropna(subset=["prev_comb"]))
     bt = pd.concat(out, ignore_index=True)
-    bt["prev_media"] = bt[[f"prev_{j}" for j in JANELAS]].mean(axis=1)
+    bt["prev_media"] = bt[[f"prev_{j}" for j in MODELOS]].mean(axis=1)
     return bt
 
 
 def calibracao(bt: pd.DataFrame) -> pd.DataFrame:
     """Pesos da combinação e fatores do IC para uso ao vivo (usa até o último dia disponível)."""
-    jans = list(JANELAS)
+    jans = list(MODELOS)
     linhas = []
     for ch, g in bt[bt["usada_estim"]].groupby("chave"):
         g = g.tail(CALIB_DIAS)
@@ -483,7 +578,7 @@ def calibracao(bt: pd.DataFrame) -> pd.DataFrame:
 
 def resumir_backtest(bt: pd.DataFrame) -> pd.DataFrame:
     """Métricas por estratégia e modelo (erros em bps de retorno diário)."""
-    modelos = {j: f"prev_{j}" for j in JANELAS}
+    modelos = {j: f"prev_{j}" for j in MODELOS}
     modelos.update({"comb": "prev_comb", "média": "prev_media", "só CDI": "cdi"})
     real = np.expm1(bt["real"])
     linhas = []
@@ -496,7 +591,7 @@ def resumir_backtest(bt: pd.DataFrame) -> pd.DataFrame:
             p_exc = (np.expm1(g[col]) - np.expm1(g["cdi"]))[ok]
             lin = {"Estrategia": est, "Modelo": nome, "obs": int(ok.sum()),
                    "MAE_bps": e.abs().mean() * 1e4, "RMSE_bps": np.sqrt((e ** 2).mean()) * 1e4,
-                   "R2_fora_amostra": 1 - (e ** 2).sum() / (exc[ok] ** 2).sum(),
+                   "R2_fora_amostra": 1 - (e ** 2).sum() / (exc[ok] ** 2).sum() if (exc[ok] ** 2).sum() > 0 else np.nan,
                    "acerto_sinal": (np.sign(p_exc) == np.sign(exc[ok])).mean() if col != "cdi" else np.nan,
                    "vies_bps": -e.mean() * 1e4, "cobertura_IC": np.nan, "cobertura_IC_teo": np.nan,
                    "largura_IC_bps": np.nan}
@@ -530,7 +625,8 @@ def fechamento_anterior(px: pd.DataFrame, hoje=None) -> pd.Timestamp:
 
 
 def movimento_fatores(px: pd.DataFrame, agora: pd.Series, d0: pd.Timestamp) -> pd.Series:
-    m = _transformar(agora.to_frame().T).iloc[0] - _transformar(px).ffill().loc[:d0].iloc[-1]
+    vis = fatores_visiveis(px.columns)
+    m = (_transformar(agora.reindex(vis).to_frame().T).iloc[0] - _transformar(px[vis]).ffill().loc[:d0].iloc[-1])
     return pd.Series({c: (np.expm1(v) if not c.startswith("TX_") else v) for c, v in m.items()})
 
 
@@ -566,6 +662,7 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
     """Prévia do dia por fundo e janela (e combinada), com IC calibrado; cota estimada encadeada."""
     hoje = pd.Timestamp(hoje or hoje_br())
     L = _transformar(px).ffill()
+    agora = completar_agora(px, agora.reindex(px.columns).fillna(px.ffill().iloc[-1]), fechamento_anterior(px, hoje))
     agora_t = _transformar(agora.to_frame().T).iloc[0]
     cdi_dia = np.log1p(cdi.dropna().iloc[-1] / 100)
     base = cot.sort_values("data").groupby("chave").tail(1).set_index("chave")
@@ -590,7 +687,7 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
     k_de = lambda j: cal[f"k_{j}"].fillna(1.0) if f"k_{j}" in cal else 1.0
     LD, LA, MD, MA, R2, TE = {}, {}, {}, {}, {}, {}
 
-    for jan in JANELAS:
+    for jan in MODELOS:
         b = bet[bet["janela"] == jan].set_index("chave").reindex(df.index)
         bb = b[bcols]
         tem = bb.notna().any(axis=1)
@@ -612,10 +709,10 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
         df[f"te_{jan}"] = b["te"]
 
     LD, LA, MD, MA, R2, TE = (pd.DataFrame(x) for x in (LD, LA, MD, MA, R2, TE))
-    if all(f"w_{j}" in cal for j in JANELAS):
-        W = pd.DataFrame({j: cal[f"w_{j}"] for j in JANELAS})
+    if all(f"w_{j}" in cal for j in MODELOS):
+        W = pd.DataFrame({j: cal[f"w_{j}"] for j in MODELOS})
     else:
-        W = pd.DataFrame(1.0, index=df.index, columns=list(JANELAS))
+        W = pd.DataFrame(1.0, index=df.index, columns=list(MODELOS))
     W = W.where(LD.notna(), 0).fillna(0)
     W = W.div(W.sum(axis=1).replace(0, np.nan), axis=0)
     soma = lambda X: (X.fillna(0) * W).sum(axis=1).where(W.sum(axis=1) > 0)
@@ -625,9 +722,9 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
     df["cota_est_comb"] = df["cota_base"] * np.exp(la)
     df["cota_est_comb_min"], df["cota_est_comb_max"] = df["cota_base"] * np.exp(la - mac), df["cota_base"] * np.exp(la + mac)
     df["r2_comb"], df["te_comb"] = soma(R2), soma(TE)
-    for j in JANELAS:
+    for j in MODELOS:
         df[f"peso_{j}"] = W[j]
-    p = df[[f"previa_{j}" for j in JANELAS]]
+    p = df[[f"previa_{j}" for j in MODELOS]]
     df["amplitude_janelas"] = p.max(axis=1) - p.min(axis=1)
     df["dias_desde_base"] = df["data_base"].map(dias)
     df["ref_dia"] = d_ant
@@ -635,7 +732,7 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
 
 
 # Rentabilidade acumulada (cota CVM)
-JANELAS_ACUM = ["Dia", "Semana", "Mês", "1M", "3M", "6M", "Ano", "12M"]
+JANELAS_ACUM = ["Dia", "Semana", "Mês", "1M", "3M", "6M", "Ano", "12M", "24M", "36M"]
 TOLERANCIA_INICIO = 10   # dias: aceita a primeira cota disponível se ela estiver até 10 dias depois do início ideal
 
 
@@ -647,7 +744,7 @@ def _alvo(ref: pd.Timestamp, janela: str) -> pd.Timestamp:
         return ref.replace(day=1) - pd.Timedelta(days=1)
     if janela == "Ano":
         return ref.replace(month=1, day=1) - pd.Timedelta(days=1)
-    meses = {"1M": 1, "3M": 3, "6M": 6, "12M": 12}[janela]
+    meses = {"1M": 1, "3M": 3, "6M": 6, "12M": 12, "24M": 24, "36M": 36}[janela]
     return ref - pd.DateOffset(months=meses)
 
 
@@ -725,11 +822,11 @@ def ordenar_estrategias(presentes) -> list[str]:
 
 
 def rot(j: str) -> str:
-    return "combinada" if j == "comb" else j
+    return {"comb": "combinada", "ew": "EW"}.get(j, j)
 
 
 def todas_janelas() -> list[str]:
-    return ["comb"] + list(JANELAS)
+    return ["comb"] + list(MODELOS)
 
 
 # API
@@ -760,7 +857,8 @@ def _dados():
     chave = tuple((DADOS / n).stat().st_mtime for n in _ARQS)
     if _CACHE.get("chave") != chave:
         univ, cot, bet = carregar_base()
-        falta = [j for j in JANELAS if j not in set(bet["janela"])]
+        ndias = cot["data"].nunique()
+        falta = [j for j in MODELOS if j not in set(bet["janela"]) and MIN_OBS.get(j, MIN_OBS_EW) <= ndias]
         if falta:
             print(f"Betas sem as janelas {falta}. Rode pv.estimar() para recalcular.")
         px, cdi = carregar_fatores()
@@ -849,11 +947,12 @@ def estimar():
     cal = calibracao(_backtest_fundos(univ, cot, px, cdi))
     cal.to_parquet(DADOS / "calibracao.parquet")
     r = (bet.merge(univ[["chave", "Estrategia"]], on="chave")
-         .pivot_table(index="Estrategia", columns="janela", values="r2", aggfunc="median")[_janelas()])
+         .pivot_table(index="Estrategia", columns="janela", values="r2", aggfunc="median")
+         .reindex(columns=_janelas()))
     r.columns = [f"R² {j}" for j in r.columns]
     cw = cal.join(univ.set_index("chave")["Estrategia"]).groupby("Estrategia")
-    for j in JANELAS:
-        r[f"Peso {j}"] = cw[f"w_{j}"].mean().reindex(r.index)
+    for j in MODELOS:
+        r[f"Peso {j}"] = cw[f"w_{j}"].mean().reindex(r.index) if f"w_{j}" in cal else np.nan
     r["Fator IC"] = cw["k_comb"].median().reindex(r.index)
     r = r.rename_axis("Estratégia").reset_index()
     _mostrar(r, "R² mediano, peso médio de cada janela na combinada e fator de calibração do IC",
@@ -914,7 +1013,7 @@ def previa(estrategia=None, gestor: str | None = None, busca: str | None = None,
     pcts = [c for c in tab if c.startswith(("Prévia", "Mín", "Máx", "Amplitude"))]
     _mostrar(tab.head(top) if top else tab, f"Fundos ({len(tab)})" + (f", top {top}" if top else ""),
              pct=pcts, mi=["PL (R$ mi)"], datas=["Última cota"], cota=["Cota estimada"])
-    print(f"Combinada = média das janelas {', '.join(JANELAS)} ponderada pelo inverso do erro dos últimos "
+    print(f"Combinada = média dos modelos {', '.join(MODELOS)} ponderada pelo inverso do erro dos últimos "
           f"{CALIB_DIAS} dias. Mín/Máx = IC {IC_NIVEL:.0%} bicaudal calibrado pelos erros do próprio fundo. "
           f"Confiança = R² ponderado: alta ≥ 0,7, média 0,4–0,7, baixa < 0,4.")
     atras = (df["data_base"] < d0).sum()
@@ -956,7 +1055,7 @@ def detalhe(texto: str, dias: int = 63, janela: str | None = None):
         print(f"{len(cand)} fundos contêm '{texto}'; mostrando o de maior PL.")
     print(f"\n{_rotulo(f)}\n{f['CNPJ']} · {f['Estrategia']} ({f['Classe_ANBIMA']}) · {f['Gestor']} · "
           f"PL R$ {f['pl']/1e6:,.0f} mi".replace(",", "."))
-    b = bet[bet["chave"] == f["chave"]].set_index("janela").reindex([j for j in JANELAS])
+    b = bet[bet["chave"] == f["chave"]].set_index("janela").reindex([j for j in MODELOS])
     b = b[b["r2"].notna()]
     if b.empty:
         print("Sem histórico suficiente para estimar.")
@@ -978,11 +1077,11 @@ def detalhe(texto: str, dias: int = 63, janela: str | None = None):
     lo, hi = np.expm1(g[f"ic_{jan}_min"]) * 100, np.expm1(g[f"ic_{jan}_max"]) * 100
     dentro = ((g["real"] >= g[f"ic_{jan}_min"]) & (g["real"] <= g[f"ic_{jan}_max"])).mean()
     erros = {rot(j): ((np.expm1(g["real"]) - np.expm1(g[f"prev_{j}"])).abs().mean() * 1e4) for j in todas_janelas()}
-    pesos = g[[f"w_{j}" for j in JANELAS]].iloc[-1]
+    pesos = g[[f"w_{j}" for j in MODELOS]].iloc[-1]
     print(f"Últimos {len(g)} dias, fora da amostra. Erro médio (bps): "
           + ", ".join(f"{j} {e:.0f}" for j, e in erros.items())
           + f". Cota real dentro do IC {IC_NIVEL:.0%} ({rot(jan)}) em {dentro:.0%} dos dias. "
-          + "Pesos atuais da combinada: " + ", ".join(f"{j} {pesos[f'w_{j}']:.0%}" for j in JANELAS) + ".")
+          + "Pesos atuais da combinada: " + ", ".join(f"{j} {pesos[f'w_{j}']:.0%}" for j in MODELOS) + ".")
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -1096,7 +1195,7 @@ def consolidado(com_backtest: bool = True, com_alfa: bool = False, salvar: str |
         out[f"Prévia mín {rot(j)}"] = df[f"previa_{j}_min"].values
         out[f"Prévia máx {rot(j)}"] = df[f"previa_{j}_max"].values
     out["Amplitude janelas"] = df["amplitude_janelas"].values
-    for j in JANELAS:
+    for j in MODELOS:
         out[f"Peso {j}"] = df[f"peso_{j}"].values
     for j in js:
         out[f"Cota estimada {rot(j)}"] = df[f"cota_est_{j}"].values
@@ -1117,7 +1216,7 @@ def consolidado(com_backtest: bool = True, com_alfa: bool = False, salvar: str |
 
     fats = [c for c in FATORES if f"b_{c}" in bet] + [c[2:] for c in bet if c.startswith("b_TX_")]
     extra = {}
-    for j in JANELAS:
+    for j in MODELOS:
         b = bet[bet["janela"] == j].set_index("chave").reindex(out.index)
         extra[f"R² {j}"] = b["r2"]
         extra[f"Erro anual {j}"] = b["te"]
@@ -1125,7 +1224,9 @@ def consolidado(com_backtest: bool = True, com_alfa: bool = False, salvar: str |
         extra[f"Obs. {j}"] = b["n"]
         for fz in fats:
             extra[f"β {fz} {j}"] = b[f"b_{fz}"]
-    out = pd.concat([out, pd.DataFrame(extra, index=out.index)], axis=1)
+    extra = pd.DataFrame(extra, index=out.index)
+    extra = extra.drop(columns=[c for c in extra if c.startswith("β") and extra[c].isna().all()])
+    out = pd.concat([out, extra], axis=1)
 
     if com_backtest:
         bt = _backtest_fundos(univ, cot, px, cdi)
@@ -1183,6 +1284,35 @@ def _salvar_excel(df: pd.DataFrame, caminho: Path) -> None:
             if fmt:
                 for (cel,) in ws.iter_rows(min_row=2, min_col=j, max_col=j):
                     cel.number_format = fmt
+
+
+def testar_fatores(por_estrategia: int = 60, semente: int = 1):
+    """Compara, fora da amostra, onde usar os fatores adicionais. Usa uma amostra de fundos por estratégia."""
+    if not _base_ok():
+        return None
+    univ, cot, _, px, cdi = _dados()
+    amostra = pd.concat([g.sample(min(len(g), por_estrategia), random_state=semente)
+                         for _, g in univ.groupby("Estrategia")])
+    guardado = (OBS_MIN_ADICIONAIS, RIDGE_ESCALA, dict(FATORES_ADICIONAIS))
+    cfg = {"Extras em todos os modelos": (0, guardado[1], True),
+           "Extras só com >= 120 obs. (padrão)": (120, guardado[1], True),
+           "Sem fatores adicionais": (0, guardado[1], False)}
+    res = {}
+    g = globals()
+    try:
+        for nome, (omin, escala, extras) in cfg.items():
+            g["OBS_MIN_ADICIONAIS"], g["RIDGE_ESCALA"] = omin, escala
+            g["FATORES_ADICIONAIS"] = guardado[2] if extras else {}
+            bt = _backtest_fundos(amostra, cot, px, cdi)
+            r = resumir_backtest(bt[bt["usada_estim"]])
+            r = r[r["Estrategia"] == "Todas"].set_index("Modelo")["MAE_bps"]
+            res[nome] = r.reindex(MODELOS + ["comb"])
+    finally:
+        g["OBS_MIN_ADICIONAIS"], g["RIDGE_ESCALA"], g["FATORES_ADICIONAIS"] = guardado
+    t = pd.DataFrame(res).T.rename(columns=rot).rename_axis("Configuração").reset_index()
+    _mostrar(t, f"Erro médio fora da amostra (bps), {len(amostra)} fundos", bps=[c for c in t if c != "Configuração"])
+    print("Menor é melhor. Para mudar, ajuste OBS_MIN_ADICIONAIS no topo do previa.py e rode pv.estimar().")
+    return t
 
 
 def rodar_tudo():

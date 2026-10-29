@@ -28,13 +28,16 @@ COR = {
     "verde": "#3F7A1F", "vermelho": "#B83A00", "laranja": "#F98909", "cinza": "#5F6B75", "linha": "#D5E0E8",
     "fundo": "#EEF3F7", "zebra": "#F7FAFC",
 }
-JAN = list(pv.JANELAS)
+JAN = list(getattr(pv, "MODELOS", pv.JANELAS))
 TODAS = pv.todas_janelas()
-COR_JANELA = {"1m": COR["celeste"], "2m": COR["azul"], "3m": COR["petroleo"], "12m": COR["marinho"],
+COR_JANELA = {"1m": "#B9DCE8", "2m": COR["celeste"], "3m": COR["azul"], "6m": "#2BA9B4", "12m": COR["petroleo"],
+              "24m": COR["marinho"], "ew": "#5F6B75", "EW": "#5F6B75",
               "comb": COR["laranja"], "combinada": COR["laranja"], "só CDI": "#B8C2CA"}
 FONTE = "'Compass', 'Compass Sans', 'Compass Pro', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
 AMPLITUDE_MIN = 0.0025
 NOMES_FATOR = {"IBOV": "Ibovespa", "SMLL": "Small caps", "USD": "Dólar", "SPX": "S&P 500", "IFIX": "IFIX",
+               "NDX": "Nasdaq", "BRENT": "Petróleo Brent", "OURO": "Ouro", "EEM": "Emergentes (EEM)",
+               "TX_UST10": "Treasury 10a", "SPX_L1": "S&P 500 (D-1)", "USD_L1": "Dólar (D-1)",
                "IRFM": "IRF-M", "IMAB": "IMA-B"}
 
 st.set_page_config(page_title="Prévia de cotas · Hedge Investments", layout="wide",
@@ -72,7 +75,7 @@ def esc(t):
 
 
 def rot(j):
-    return "Comb" if j == "comb" else j
+    return {"comb": "Comb", "ew": "EW"}.get(j, j)
 
 
 import re as _re
@@ -410,7 +413,7 @@ def variacoes_fatores(px, agora, d_ant):
            "mês": base_mes.iloc[-1] if len(base_mes) else h.iloc[0],
            "ano": base_ano.iloc[-1] if len(base_ano) else h.iloc[0]}
     out = {}
-    for f in px.columns:
+    for f in pv.fatores_visiveis(px.columns):
         tx = f.startswith("TX_")
         out[f] = {"último": agora[f], **{k: (agora[f] - b[f]) if tx else (agora[f] / b[f] - 1) for k, b in ref.items()}}
     return pd.DataFrame(out).T
@@ -499,7 +502,7 @@ d_ant = pv.fechamento_anterior(px)
 
 
 def limpar_manual():
-    for fz in px.columns:
+    for fz in pv.fatores_visiveis(px.columns):
         st.session_state[f"man_{fz}"] = None
 
 
@@ -512,7 +515,7 @@ def aplicar_manual(agora: pd.Series, manual: dict) -> pd.Series:
 
 
 ESTRATEGIAS = [e for e in pv.ordenar_estrategias(univ["Estrategia"].unique()) if e != "Todas"]
-NOME_MODELO = {"comb": "Combinada", **{j: f"Janela {j}" for j in JAN}}
+NOME_MODELO = {"comb": "Combinada", "ew": "EW (exponencial)", **{j: f"Janela {j}" for j in JAN if j != "ew"}}
 estr, gest, jref, r2min, plmin, com_alfa, manual = [], [], "comb", 0.0, 0, False, {}
 intervalo = st.session_state.get("intervalo", 60)
 
@@ -542,7 +545,8 @@ def controles():
                  "Campos vazios seguem o Yahoo.")
             cc = st.columns(2)
             vals = {fz: cc[i % 2].number_input(NOMES_FATOR.get(fz, fz), value=None, step=0.1, format="%.2f",
-                                               key=f"man_{fz}", placeholder="Yahoo") for i, fz in enumerate(px.columns)}
+                                               key=f"man_{fz}", placeholder="Yahoo")
+                    for i, fz in enumerate(pv.fatores_visiveis(px.columns))}
             st.button("Limpar valores manuais", width="stretch", on_click=limpar_manual)
         manual = {k: x for k, x in vals.items() if x is not None}
         if c[6].button("Atualizar preços", width="stretch", help="Consulta o Yahoo agora."):
@@ -618,14 +622,15 @@ def painel_rentabilidade(df):
         linhas.append([td(f'<b>{esc(apelido(r["CNPJ"], r["Nome"]))}</b>', "l")]
                       + [td(a.get(f"r_{k}"), extra="v" if k in ("Ano", "12M") else "") for k in jans]
                       + [td(a.get("pcdi_Ano"), "pctu", 0), td(a.get("pcdi_12M"), "pctu", 0),
-                         td(p.get("rp_Mês"), extra="s"), td(p.get("rp_Ano"), extra="s"), td(p.get("rp_12M"), extra="s")])
+                         td(p.get("rp_Semana"), extra="s"), td(p.get("rp_Mês"), extra="s"), td(p.get("rp_Ano"), extra="s"),
+                         td(p.get("rp_12M"), extra="s")])
         classes.append("casa" if i == 0 else "")
     a0 = REAL.loc[h.iloc[0]["chave"]]
-    linhas.append([td("CDI", "l")] + [td(a0.get(f"cdi_{k}"), extra="s") for k in jans] + [td("", "html")] * 5)
+    linhas.append([td("CDI", "l")] + [td(a0.get(f"cdi_{k}"), extra="s") for k in jans] + [td("", "html")] * 6)
     classes.append("")
     corpo = tabela([("Classe", "l")] + [(k, "r") for k in jans]
-                   + [("% CDI ano", "r"), ("% CDI 12M", "r"), ("Mês c/ prévia", "r"), ("Ano c/ prévia", "r"),
-                      ("12M c/ prévia", "r")], linhas, classes)
+                   + [("% CDI ano", "r"), ("% CDI 12M", "r"), ("Semana c/ prévia", "r"), ("Mês c/ prévia", "r"),
+                      ("Ano c/ prévia", "r"), ("12M c/ prévia", "r")], linhas, classes)
     ini12 = a0.get("base_12M")
     return painel("Rentabilidade acumulada · Hedge Alternative", corpo, f"cota CVM até {data_br(d_ref)}",
                   f"Retornos pela cota oficial da CVM, da última cota até a data-base de cada janela"
@@ -799,11 +804,12 @@ def aba_fundo(v):
         f'mês {pct(rr.get("r_mes"))}, ano {pct(rr.get("r_ano"))}. PL R$ {num(f["pl"] / 1e6)} mi.'), c1)
     b = bet[bet["chave"] == f["chave"]].set_index("janela").reindex(JAN)
     bcols = [c for c in b if c.startswith("b_") and b[c].notna().any()]
-    lin_b = [[td(NOMES_FATOR.get(c[2:], c[2:]), "l")] + [td(b.loc[jn, c], "num", 2, extra=cls(b.loc[jn, c])) for jn in JAN]
+    lin_b = [[td(NOMES_FATOR.get(c[2:], c[2:]), "l")] + [td(b.loc[jn, c], "num", 2, extra=cls(b.loc[jn, c])) if pd.notna(b.loc[jn, c])
+                                                        else td("·", "html", extra="s") for jn in JAN]
              for c in bcols]
     lin_b.append([td("<b>R²</b>", "l")] + [td(b.loc[jn, "r2"], "num", 2) for jn in JAN])
     lin_b.append([td("<b>Erro anual</b>", "l")] + [td(b.loc[jn, "te"], "pctu", 1) for jn in JAN])
-    html_bloco(painel("Sensibilidades (β)", tabela([("Fator", "l")] + [(jn, "r") for jn in JAN], lin_b),
+    html_bloco(painel("Sensibilidades (β)", tabela([("Fator", "l")] + [(rot(jn), "r") for jn in JAN], lin_b),
                       "% do fundo por 1% do fator"), c2)
     jans = pv.JANELAS_ACUM
     acp = pv.com_previa(REAL, v).reindex([f["chave"]])

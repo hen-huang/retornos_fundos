@@ -1,7 +1,8 @@
 # Prévia de cotas por fatores
 
-Prévia do retorno diário de fundos Long Only, Long Biased, Long Short e Macro (PL ≥ R$ 100 mi),
-estimada em quatro janelas (1m, 2m, 3m, 12m) com intervalo de predição de 95% bicaudal.
+Prévia do retorno diário de fundos Long Only, Long Biased, Long Short, Macro e Hedge Alternative,
+estimada em seis janelas (1m, 2m, 3m, 6m, 12m, 24m) e num modelo exponencial (EW), combinados pelo
+erro fora da amostra, com intervalo de predição de 95% calibrado. Base de 36 meses de cotas da CVM.
 
 ## Instalação
 
@@ -68,10 +69,10 @@ no `painel.py`.
 
 `pv.retornos_acumulados(cot, cdi)` calcula, para cada fundo, o retorno da última cota da CVM contra a
 cota da data-base de cada janela (`JANELAS_ACUM`): Dia, Semana (7 dias corridos), Mês (desde o fim do mês
-anterior), 1M, 3M, 6M (meses corridos), Ano (desde 31/12) e 12M. Também traz o CDI do mesmo período e o
+anterior), 1M, 3M, 6M (meses corridos), Ano (desde 31/12), 12M, 24M e 36M. Também traz o CDI do mesmo período e o
 % do CDI. Se o histórico do fundo começar até `TOLERANCIA_INICIO` (10) dias depois da data-base ideal,
-usa a primeira cota disponível, e a data usada fica em `base_<janela>`. A atualização baixa 14 meses de
-informes para que os 12M fiquem completos. O `pv.consolidado()` inclui essas colunas.
+usa a primeira cota disponível, e a data usada fica em `base_<janela>`. A atualização baixa 37 meses de
+informes para que os 36M fiquem completos. O `pv.consolidado()` inclui essas colunas.
 
 ## Modelo
 
@@ -90,11 +91,24 @@ Por fundo e janela, em log-retornos:
   recente do fundo a 95%. O fator é encolhido para 1 em amostras curtas e limitado entre 0,75 e 3.
   No backtest, a combinação e a calibração são rolantes, sem uso de dados futuros.
 
-| Estratégia | Fatores |
-|---|---|
-| Long Only, Long Biased, Long Short | IBOV, SMAL11, S&P 500, dólar, XFIX11 |
-| Macro | IBOV, S&P 500, dólar, IRFM11, IMAB11, XFIX11 |
-| Hedge Alternative | todos: IBOV, SMAL11, S&P 500, dólar, IRFM11, IMAB11, XFIX11 |
+| Estratégia | Fatores principais (todos os modelos) | Adicionais (6m, 12m, 24m, EW) |
+|---|---|---|
+| Long Only, Long Biased | IBOV, SMAL11, S&P 500, dólar, XFIX11 | Nasdaq, Brent, ouro, EEM, S&P D-1, dólar D-1 |
+| Long Short | IBOV, SMAL11, S&P 500, dólar, XFIX11 | Nasdaq, Brent, EEM, S&P D-1 |
+| Macro | IBOV, S&P 500, dólar, IRFM11, IMAB11, XFIX11 | Treasury 10a, Brent, ouro, EEM, S&P D-1, dólar D-1 |
+| Hedge Alternative | IBOV, SMAL11, S&P 500, dólar, IRFM11, IMAB11, XFIX11 | Treasury 10a, Brent, ouro, S&P D-1, dólar D-1 |
+
+**Modelos:** janelas móveis de 1m, 2m, 3m, 6m, 12m e 24m (21 a 500 pregões) e **EW**, que usa todo o
+histórico com peso exponencial (meia-vida de 63 pregões). A **combinada** pondera os sete pelo inverso do
+erro recente de cada fundo.
+
+**Fatores defasados (D-1):** S&P 500 e dólar do dia anterior, para fundos que marcam ativos no exterior
+com preço de D-1 ou que têm fechamento assíncrono.
+
+**Contra sobreajuste:** o ridge é adaptativo, `RIDGE × (1 + RIDGE_ESCALA × fatores / obs.)`, e os fatores
+adicionais só entram nos modelos com pelo menos `OBS_MIN_ADICIONAIS` (120) observações. Para conferir
+com os seus dados se vale incluí-los também nas janelas curtas, rode `pv.testar_fatores()`: ele compara,
+fora da amostra, os extras em todos os modelos, só nos longos ou em nenhum.
 
 `FUNDOS_INCLUIR` (topo do `previa.py`) força fundos no universo com estratégia própria, ignorando classe,
 PL mínimo e exclusividade. Vem com os 4 fundos da Hedge Alternative Investments (Master, FICFI, W FIC e
