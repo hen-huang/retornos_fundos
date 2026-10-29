@@ -77,8 +77,12 @@ URL_CDI = ("https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados"
 
 
 # Utilidades
+def hoje_br() -> date:
+    return pd.Timestamp.now(tz="America/Sao_Paulo").date()
+
+
 def _log(msg: str) -> None:
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    print(f"[{pd.Timestamp.now(tz='America/Sao_Paulo'):%H:%M:%S}] {msg}", flush=True)
 
 
 def _session():
@@ -105,7 +109,7 @@ def baixar(url: str, destino: Path, forcar: bool = False) -> bool:
 
 
 def _meses(n: int, hoje: date | None = None) -> list[str]:
-    p = pd.Period(hoje or date.today(), "M")
+    p = pd.Period(hoje or hoje_br(), "M")
     return [str(p - i).replace("-", "") for i in range(n)][::-1]
 
 
@@ -233,7 +237,7 @@ def baixar_fatores(inicio: pd.Timestamp) -> pd.DataFrame:
 
 
 def baixar_cdi(inicio: pd.Timestamp) -> pd.Series:
-    url = URL_CDI.format(ini=inicio.strftime("%d/%m/%Y"), fim=date.today().strftime("%d/%m/%Y"))
+    url = URL_CDI.format(ini=inicio.strftime("%d/%m/%Y"), fim=hoje_br().strftime("%d/%m/%Y"))
     r = _session().get(url, timeout=60)
     r.raise_for_status()
     js = pd.DataFrame(r.json())
@@ -504,7 +508,7 @@ def precos_ao_vivo(colunas: list[str]) -> tuple[pd.Series, pd.Timestamp]:
 
 
 def fechamento_anterior(px: pd.DataFrame, hoje=None) -> pd.Timestamp:
-    hoje = pd.Timestamp(hoje or date.today()).normalize()
+    hoje = pd.Timestamp(hoje or hoje_br()).normalize()
     idx = px.dropna(how="all").index
     ant = idx[idx < hoje]
     return ant[-1] if len(ant) else idx[-1]
@@ -545,7 +549,7 @@ def _meia_largura(b: pd.DataFrame, mov_dia: pd.Series, x_acum: pd.DataFrame, nd:
 def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_alfa: bool = False,
                     cal: pd.DataFrame | None = None) -> pd.DataFrame:
     """Prévia do dia por fundo e janela (e combinada), com IC calibrado; cota estimada encadeada."""
-    hoje = pd.Timestamp(hoje or date.today())
+    hoje = pd.Timestamp(hoje or hoje_br())
     L = _transformar(px).ffill()
     agora_t = _transformar(agora.to_frame().T).iloc[0]
     cdi_dia = np.log1p(cdi.dropna().iloc[-1] / 100)
@@ -796,7 +800,7 @@ def previa(estrategia=None, gestor: str | None = None, busca: str | None = None,
 
     d0 = fechamento_anterior(px)
     mov = movimento_fatores(px, agora, d0)
-    print(f"Prévia diária de {date.today():%d/%m/%Y} · {origem}")
+    print(f"Prévia diária de {hoje_br():%d/%m/%Y} · {origem}")
     print(f"Fatores no dia (desde {d0:%d/%m}): "
           + " | ".join(f"{k} {v:+.2%}" if not k.startswith("TX_") else f"{k} {v:+.2f}pp" for k, v in mov.items()))
 

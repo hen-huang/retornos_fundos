@@ -144,17 +144,28 @@ def qualidade(_m):
     return pv.resumir_backtest(ok), pf, (ok["data"].min(), ok["data"].max(), len(ok))
 
 
-if not (pv.DADOS / "betas.parquet").exists():
-    st.error("Base não encontrada. Rode pv.atualizar() e pv.estimar() antes de abrir o painel.")
-    st.stop()
+TRAVA = pv.DADOS / ".atualizando"
+FALHA = pv.DADOS / ".falha_atualizacao"
+AUTO_ATUALIZAR = True          # atualiza sozinho 1x por dia útil, a partir das 8h30 (útil no Streamlit Cloud)
 
-M = _mtime()
-univ, cot, bet, px, cdi, cal = base(M)
-d_ref = cot["data"].max()
-d_ant = pv.fechamento_anterior(px)
 
-def atualizar_base():
+def _agora_br():
+    return pd.Timestamp.now(tz="America/Sao_Paulo")
+
+
+def _travado() -> bool:
+    return TRAVA.exists() and (pd.Timestamp.now().timestamp() - TRAVA.stat().st_mtime) < 30 * 60
+
+
+def atualizar_base(rotulo="Atualizando a base…"):
     import contextlib
+    if _travado():
+        st.info("Outra sessão está atualizando a base. Esta página recarrega sozinha quando terminar.")
+        import time
+        time.sleep(20)
+        st.rerun()
+    pv.DADOS.mkdir(parents=True, exist_ok=True)
+    TRAVA.write_text(str(_agora_br()))
     linhas = []
 
     class _Escreve(io.StringIO):
@@ -164,21 +175,54 @@ def atualizar_base():
                 caixa.code("\n".join(linhas[-12:]), language=None)
             return len(txt)
 
-    with st.status("Atualizando a base…", expanded=True) as status:
-        caixa = st.empty()
-        try:
-            with contextlib.redirect_stdout(_Escreve()):
-                pv.atualizar()
-                pv.estimar()
-        except Exception as e:
-            msg = "sem conexão com a CVM, o Yahoo ou o Banco Central" if "Connection" in type(e).__name__ \
-                or "Max retries" in str(e) else str(e)[:160]
-            status.update(label=f"Falha na atualização: {msg}. A base anterior foi mantida.", state="error")
-            return
-        status.update(label="Base atualizada", state="complete")
+    try:
+        with st.status(rotulo, expanded=True) as status:
+            caixa = st.empty()
+            try:
+                with contextlib.redirect_stdout(_Escreve()):
+                    pv.atualizar()
+                    pv.estimar()
+            except Exception as e:
+                msg = ("sem conexão com a CVM, o Yahoo ou o Banco Central" if "Connection" in type(e).__name__
+                       or "Max retries" in str(e) else str(e)[:160])
+                status.update(label=f"Falha na atualização: {msg}. A base anterior foi mantida.", state="error")
+                FALHA.write_text(msg)
+                return
+            status.update(label="Base atualizada", state="complete")
+            FALHA.unlink(missing_ok=True)
+    finally:
+        TRAVA.unlink(missing_ok=True)
     st.cache_data.clear()
     pv._CACHE.clear()
     st.rerun()
+
+
+def _base_desatualizada() -> bool:
+    p = pv.DADOS / "betas.parquet"
+    if not p.exists():
+        return True
+    feita = pd.Timestamp(p.stat().st_mtime, unit="s", tz="UTC").tz_convert("America/Sao_Paulo")
+    agora = _agora_br()
+    return agora.weekday() < 5 and (agora.hour, agora.minute) >= (8, 30) and feita.date() < agora.date()
+
+
+if not (pv.DADOS / "betas.parquet").exists():
+    st.markdown('<div class="topo"><div><div class="marca">Hedge Investments</div>'
+                '<div class="titulo">Prévia Diária de Cotas</div></div></div>', unsafe_allow_html=True)
+    st.info("Primeira execução: montando a base (12 meses de cotas da CVM, cadastro, fatores do Yahoo e CDI) "
+            "e estimando os modelos. Leva alguns minutos e só acontece uma vez por dia.")
+    atualizar_base("Montando a base…")
+    st.stop()
+
+falhou_recente = FALHA.exists() and (pd.Timestamp.now().timestamp() - FALHA.stat().st_mtime) < 60 * 60
+if AUTO_ATUALIZAR and _base_desatualizada() and not _travado() and not falhou_recente:
+    st.info("Base de ontem: atualizando com as cotas de hoje da CVM. Leva alguns minutos.")
+    atualizar_base("Atualizando a base do dia…")
+
+M = _mtime()
+univ, cot, bet, px, cdi, cal = base(M)
+d_ref = cot["data"].max()
+d_ant = pv.fechamento_anterior(px)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
