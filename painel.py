@@ -10,6 +10,14 @@ import streamlit as st
 
 import previa as pv
 
+_PRECISA = ["ordenar_estrategias", "todas_janelas", "rot", "carregar_calibracao", "calibracao", "APELIDOS",
+            "FUNDOS_INCLUIR", "ORDEM_ESTRATEGIAS", "hoje_br"]
+_faltam = [n for n in _PRECISA if not hasattr(pv, n)]
+if _faltam:
+    st.error("O arquivo previa.py está desatualizado em relação ao painel.py. Suba a versão nova do previa.py "
+             "(a mesma do pacote do painel) e recarregue a página. Faltam: " + ", ".join(_faltam))
+    st.stop()
+
 COR = {
     "marinho": "#0A4263", "tinta": "#0B2C42", "azul": "#00A0D7", "celeste": "#81C1D7", "petroleo": "#145A75",
     "verde": "#3F7A1F", "vermelho": "#B83A00", "laranja": "#F98909", "cinza": "#5F6B75", "linha": "#DCE5EC",
