@@ -126,7 +126,7 @@ html, body, .stApp, .stMarkdown, .stDataFrame, button, input, textarea, select, 
 .pos {{ color: {COR["verde"]}; }} .neg {{ color: {COR["vermelho"]}; }}
 
 .topo {{ display:flex; align-items:stretch; justify-content:space-between; background:{COR["marinho"]}; color:#fff;
-  border-radius:3px; overflow:hidden; border-bottom:3px solid {COR["azul"]}; }}
+  border-radius:3px 3px 0 0; overflow:hidden; border-bottom:3px solid {COR["azul"]}; }}
 .topo .marca {{ padding:10px 18px; font-weight:700; font-size:1rem; letter-spacing:.02em; display:flex; align-items:center;
   gap:12px; }}
 .topo .marca span {{ font-weight:400; color:{COR["celeste"]}; font-size:.9rem; }}
@@ -177,6 +177,36 @@ div.stDownloadButton > button, div.stButton > button[kind="primary"] {{ backgrou
   border:0; border-radius:3px; font-size:.8rem; }}
 div.stDownloadButton > button:hover, div.stButton > button[kind="primary"]:hover {{ background:{COR["azul"]}; color:#fff; }}
 .stSelectbox label, .stTextInput label {{ font-size:.74rem !important; color:{COR["cinza"]} !important; }}
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="stExpandSidebarButton"] {{ display:none !important; }}
+.st-key-barra {{ background:#FFFFFF; border:1px solid {COR["linha"]}; border-top:0; border-radius:0 0 3px 3px;
+  padding:6px 12px 10px; margin-top:-.55rem; }}
+.st-key-barra label p {{ font-size:.66rem !important; font-weight:700 !important; letter-spacing:.06em;
+  text-transform:uppercase; color:{COR["cinza"]} !important; }}
+.st-key-barra [data-baseweb="select"] > div, .st-key-barra button {{ min-height:34px; font-size:.82rem; }}
+[data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"] {{ border-color:{COR["linha"]} !important;
+  border-radius:3px !important; background:#FFFFFF !important; }}
+[data-baseweb="select"] > div:focus-within, [data-baseweb="input"]:focus-within, [data-baseweb="base-input"]:focus-within,
+[data-testid="stTextInputRootElement"]:focus-within {{ border-color:{COR["azul"]} !important; box-shadow:0 0 0 1px {COR["azul"]} !important; }}
+[data-baseweb="tag"] {{ background:#E6F3F9 !important; color:{COR["marinho"]} !important; border-radius:3px !important; }}
+[data-baseweb="tag"] span {{ color:{COR["marinho"]} !important; }}
+[data-testid="stBaseButton-primary"] {{ background:{COR["marinho"]} !important; border:1px solid {COR["marinho"]} !important;
+  color:#fff !important; border-radius:3px !important; }}
+[data-testid="stBaseButton-primary"]:hover {{ background:{COR["azul"]} !important; border-color:{COR["azul"]} !important; }}
+[data-testid="stBaseButton-secondary"], [data-testid="stPopoverButton"], [data-testid="stBaseButton-secondaryFormSubmit"] {{
+  border:1px solid {COR["linha"]} !important; color:{COR["marinho"]} !important; background:#fff !important;
+  border-radius:3px !important; }}
+[data-testid="stBaseButton-secondary"]:hover, [data-testid="stPopoverButton"]:hover {{ border-color:{COR["azul"]} !important;
+  color:{COR["azul"]} !important; }}
+[data-testid="stButtonGroup"] button[data-variant^="pills"], [data-testid="stBaseButton-pills"] {{ border:1px solid {COR["linha"]} !important; background:#fff !important;
+  color:{COR["marinho"]} !important; border-radius:3px !important; font-size:.78rem !important; }}
+[data-testid="stButtonGroup"] button[aria-pressed="true"], [data-testid="stButtonGroup"] button[aria-checked="true"],
+[data-testid="stButtonGroup"] button[data-variant="pillsActive"], [data-testid="stBaseButton-pillsActive"] {{ background:{COR["marinho"]} !important; border:1px solid {COR["marinho"]} !important;
+  color:#fff !important; border-radius:3px !important; font-size:.78rem !important; }}
+[data-testid="stButtonGroup"] button p {{ font-size:.78rem !important; }}
+[data-testid="stButtonGroup"] button[aria-pressed="true"] p {{ color:#fff !important; }}
+label[data-baseweb="checkbox"] [role="checkbox"][aria-checked="true"], label[data-baseweb="checkbox"] input:checked + div {{
+  background:{COR["azul"]} !important; }}
+[data-testid="stPopoverBody"] {{ border:1px solid {COR["linha"]}; border-radius:3px; }}
 @media (max-width: 900px) {{ .topo {{ flex-direction:column; }} .topo .chip {{ border-left:0; border-top:1px solid #1D5B7E; }} }}
 </style>
 """, unsafe_allow_html=True)
@@ -436,37 +466,45 @@ def aplicar_manual(agora: pd.Series, manual: dict) -> pd.Series:
     return agora
 
 
-with st.sidebar:
-    st.header("Filtros")
-    estr = st.multiselect("Estratégias", [e for e in pv.ordenar_estrategias(univ["Estrategia"].unique()) if e != "Todas"],
-                          default=None, placeholder="Todas")
-    gest = st.multiselect("Gestores", sorted(univ["Gestor"].dropna().unique()), placeholder="Todos")
-    jref = st.selectbox("Modelo de referência", TODAS, index=0,
-                        format_func=lambda j: "Combinada" if j == "comb" else f"Janela {j}",
-                        help="Combinada: média das janelas 1m, 2m, 3m e 12m ponderada pelo erro recente de cada fundo.")
-    r2min = st.slider("R² mínimo", 0.0, 1.0, 0.0, 0.05)
-    plmin = st.number_input("PL mínimo (R$ mi)", min_value=0, value=0, step=50)
-    com_alfa = st.toggle("Somar α estimado", value=False)
-    intervalo = st.select_slider("Atualizar a cada", [30, 60, 120, 300], value=60, format_func=lambda s: f"{s} s")
+ESTRATEGIAS = [e for e in pv.ordenar_estrategias(univ["Estrategia"].unique()) if e != "Todas"]
+NOME_MODELO = {"comb": "Combinada", **{j: f"Janela {j}" for j in JAN}}
+estr, gest, jref, r2min, plmin, com_alfa, manual = [], [], "comb", 0.0, 0, False, {}
+intervalo = st.session_state.get("intervalo", 60)
 
-    st.header("Atualização")
-    if st.button("Atualizar preços agora", width="stretch"):
-        precos.clear()
-    if st.button("Atualizar base e recalcular", width="stretch", type="primary",
-                 help="Baixa CVM, cadastro, fatores e CDI e reestima os modelos. Leva alguns minutos."):
-        atualizar_base()
-    with st.expander("Movimento manual dos fatores"):
-        nota(f"Variação do dia desde o fechamento de {data_br(d_ant)}, em % (pp para taxas TX_). "
-             "Campos vazios seguem o Yahoo.")
-        manual = {fz: st.number_input(fz, value=None, step=0.1, format="%.2f", key=f"man_{fz}", placeholder="Yahoo")
-                  for fz in px.columns}
-        st.button("Limpar valores manuais", width="stretch", on_click=limpar_manual)
-    manual = {k: x for k, x in manual.items() if x is not None}
-    if cal is None:
-        st.warning("Sem calibração. Use Atualizar base e recalcular.")
-    feita = pd.Timestamp(M[0], unit="s", tz="UTC").tz_convert("America/Sao_Paulo")
-    nota(f"Cotas CVM até {d_ref:%d/%m/%Y}. Modelos de {feita:%d/%m %H:%M}. {len(univ)} fundos. "
-         "Yahoo com cerca de 15 min de atraso na B3.")
+
+def controles():
+    """Barra de controles horizontal (substitui a barra lateral)."""
+    global estr, gest, jref, r2min, plmin, com_alfa, manual
+    with st.container(key="barra"):
+        c = st.columns([2.3, 2.1, 1.15, .85, .95, .8, 1.05, 1.2], vertical_alignment="bottom")
+        estr = c[0].multiselect("Estratégias", ESTRATEGIAS, placeholder="Todas", key="f_estr")
+        gest = c[1].multiselect("Gestores", sorted(univ["Gestor"].dropna().unique()), placeholder="Todos", key="f_gest")
+        jref = c[2].selectbox("Modelo", TODAS, format_func=NOME_MODELO.get, key="f_modelo",
+                              help="Combinada: média das janelas 1m, 2m, 3m e 12m ponderada pelo erro recente do fundo.")
+        r2min = c[3].selectbox("R² mín.", [0.0, 0.3, 0.5, 0.7, 0.9], format_func=lambda x: "Todos" if x == 0 else num(x, 1),
+                               key="f_r2")
+        plmin = c[4].selectbox("PL mín.", [0, 50, 100, 250, 500, 1000],
+                               format_func=lambda x: "Todos" if x == 0 else f"R$ {num(x)} mi", key="f_pl")
+        with c[5].popover("Ajustes", width="stretch"):
+            com_alfa = st.toggle("Somar α estimado", value=False, key="f_alfa")
+            novo = st.selectbox("Atualizar a cada", [30, 60, 120, 300], index=[30, 60, 120, 300].index(intervalo),
+                                format_func=lambda x: f"{x} segundos")
+            if novo != intervalo:
+                st.session_state["intervalo"] = novo
+                st.rerun(scope="app")
+            st.markdown("**Movimento manual dos fatores**")
+            nota(f"Variação do dia desde o fechamento de {data_br(d_ant)}, em % (pp para taxas TX_). "
+                 "Campos vazios seguem o Yahoo.")
+            cc = st.columns(2)
+            vals = {fz: cc[i % 2].number_input(NOMES_FATOR.get(fz, fz), value=None, step=0.1, format="%.2f",
+                                               key=f"man_{fz}", placeholder="Yahoo") for i, fz in enumerate(px.columns)}
+            st.button("Limpar valores manuais", width="stretch", on_click=limpar_manual)
+        manual = {k: x for k, x in vals.items() if x is not None}
+        if c[6].button("Atualizar preços", width="stretch", help="Consulta o Yahoo agora."):
+            precos.clear()
+        if c[7].button("Atualizar base", width="stretch", type="primary",
+                       help="Baixa CVM, cadastro, fatores e CDI e reestima os modelos. Leva alguns minutos."):
+            atualizar_base()
 
 
 def aplicar_filtros(df):
@@ -483,10 +521,11 @@ def barra_topo(ts, vivo, n_fundos):
     agora = _agora_br()
     luz = "vivo" if vivo else "parado"
     status = f"Ao vivo {ts:%H:%M}" if vivo else "Último fechamento"
+    feita = pd.Timestamp(M[0], unit="s", tz="UTC").tz_convert("America/Sao_Paulo")
     chips = [("Data", f"{agora:%d/%m/%Y}"), (f'<span class="{luz}"></span>Preços', status + (" + manual" if manual else "")),
              ("Base do dia", f"Fech. {data_br(d_ant)}"), ("Cotas CVM", f"até {data_br(d_ref)}"),
-             ("Modelo", "Combinada" if jref == "comb" else f"Janela {jref}"), ("Fundos", num(n_fundos))]
-    html_bloco('<div class="topo"><div class="marca">HEDGE INVESTMENTS<span>Prévia diária de cotas</span></div>'
+             ("Modelos", f"{feita:%d/%m %H:%M}"), ("Modelo", NOME_MODELO[jref]), ("Fundos", num(n_fundos))]
+    return ('<div class="topo"><div class="marca">HEDGE INVESTMENTS<span>Prévia diária de cotas</span></div>'
                '<div class="chips">' + "".join(f'<div class="chip">{r}<b>{esc(v)}</b></div>' for r, v in chips)
                + "</div></div>")
 
@@ -633,11 +672,15 @@ def grafico_real_previa(chave, j, altura=230):
 
 # Abas
 def aba_monitor(v):
-    c1, c2 = st.columns([3, 1])
-    busca = c1.text_input("Buscar fundo, gestor ou CNPJ", placeholder="Ex.: verde, kapitalo, 35.377.516",
+    c1, c2, c3 = st.columns([2.1, 3.6, 1.1], vertical_alignment="center")
+    busca = c1.text_input("Buscar fundo, gestor ou CNPJ", placeholder="Buscar fundo, gestor ou CNPJ",
                           label_visibility="collapsed")
-    ordem = c2.selectbox("Ordenar", ["Prévia (maior)", "Prévia (menor)", "Ano", "12M", "PL", "Divergência", "R²"],
+    opcoes = [e for e in ESTRATEGIAS if e in set(v["Estrategia"])]
+    sel = c2.pills("Estratégia", opcoes, selection_mode="multi", key="mon_estr", label_visibility="collapsed")
+    ordem = c3.selectbox("Ordenar", ["Prévia (maior)", "Prévia (menor)", "Ano", "12M", "PL", "Divergência", "R²"],
                          label_visibility="collapsed")
+    if sel:
+        v = v[v["Estrategia"].isin(sel)]
     if busca:
         v = v[pv._contem(v["Nome"], busca) | pv._contem(v["Gestor"], busca) | v["CNPJ"].str.contains(busca, regex=False)]
     j = jref
@@ -779,6 +822,10 @@ def aba_qualidade():
 
 @st.fragment(run_every=intervalo)
 def ao_vivo():
+    topo = st.empty()
+    controles()
+    if cal is None:
+        st.warning("Sem calibração dos modelos. Use Atualizar base.")
     agora, ts, erro = precos(tuple(px.columns))
     vivo = erro is None
     if not vivo:
@@ -789,7 +836,7 @@ def ao_vivo():
     df = pv.calcular_previa(univ, cot, bet, px, cdi, agora, com_alfa=com_alfa, cal=cal)
     v = aplicar_filtros(df)
 
-    barra_topo(ts, vivo, len(v))
+    topo.markdown(barra_topo(ts, vivo, len(v)), unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1.45, 1, 1.15])
     html_bloco(painel_hedge(df), c1)
     html_bloco(painel_mercado(px, agora), c2)

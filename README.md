@@ -49,9 +49,11 @@ Layout de estação de trabalho, em painéis uniformes:
 - Abas **Monitor de fundos** (tabela completa com busca, ordenação e exportação para Excel/CSV), **Fundo**
   (modelos, sensibilidades, gráfico de prévia × realizado) e **Qualidade do modelo**.
 
-Filtros, modelo de referência e atualização ficam na barra lateral, fechada por padrão.
+Logo abaixo do cabeçalho fica a **barra de controles**: estratégias, gestores, modelo de referência, R² e
+PL mínimos, **Ajustes** (α, intervalo de atualização e movimento manual dos fatores), **Atualizar preços**
+e **Atualizar base**. No monitor, as pílulas de estratégia filtram a tabela com um clique.
 
-Seção **Atualização** na barra lateral:
+Botões de atualização:
 - **Atualizar preços agora:** consulta o Yahoo na hora. Fora isso, os preços ficam em cache por 30 s.
 - **Atualizar base e recalcular:** roda `pv.atualizar()` e `pv.estimar()` pelo próprio painel e recarrega os dados.
 - **Movimento manual dos fatores:** a variação do dia digitada (% ou pp para `TX_`) substitui o Yahoo
