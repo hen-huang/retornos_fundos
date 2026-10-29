@@ -75,17 +75,61 @@ def rot(j):
     return "Comb" if j == "comb" else j
 
 
-def curto(nome, n=40):
-    corta = (" FUNDO DE INVESTIMENTO", " FIF ", " FIC ", " CLASSE DE", " - CLASSE", " RESPONSABILIDADE", " RESP ",
-             " GESTÃO", " GESTAO", " ADMINISTRA", " INVESTIMENTOS LTDA", " LTDA", " ASSET", " DISTRIBUIDORA",
-             " CORRETORA", " S.A", " DTVM", " GESTORA")
-    s = f" {nome} "
-    for c in corta:
-        i = s.upper().find(c)
-        if i > 4:
-            s = s[:i]
-    s = s.strip().title()
+import re as _re
+
+_ABREV = [
+    (r"FUNDO DE INVESTIMENTO FINANCEIRO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FIF"),
+    (r"FUNDO DE INVESTIMENTO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
+    (r"FUNDO DE INVESTIMENTO EM QUOTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
+    (r"FUNDO DE INVESTIMENTO FINANCEIRO", "FIF"), (r"FUNDO DE INVESTIMENTO IMOBILI[ÁA]RIO", "FII"),
+    (r"FUNDO DE INVESTIMENTO EM COTAS", "FIC"), (r"FUNDO DE INVESTIMENTO EM QUOTAS", "FIC"),
+    (r"FUNDO DE INVESTIMENTO", "FI"), (r"CLASSE DE INVESTIMENTO EM COTAS", "CIC"),
+    (r"CLASSE DE INVESTIMENTO FINANCEIRO", "CIF"), (r"CLASSE DE INVESTIMENTO", "CI"), (r"CLASSE [ÚU]NICA", "Classe Única"),
+    (r"DE COTAS DE FUNDOS DE INVESTIMENTO", "FIC"), (r"EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC"),
+    (r"RESPONSABILIDADE LIMITADA", "RL"), (r"RESP\.? LIMITADA", "RL"), (r"RESP\.? LTDA", "RL"),
+    (r"CR[ÉE]DITO PRIVADO", "CP"), (r"CR[ÉE]D\.? PRIV\.?", "CP"), (r"MULTIMERCADO", "Mult"), (r"\bMULTI\b", "Mult"),
+    (r"PREVIDENCI[ÁA]RIO", "Prev"), (r"INVESTIMENTO NO EXTERIOR", "IE"), (r"\bEM A[ÇC][ÕO]ES\b", "Ações"),
+    (r"\bDE A[ÇC][ÕO]ES\b", "Ações"), (r"LONGO PRAZO", "LP"),
+]
+_SIGLAS = {"FIF", "FIC", "FI", "FII", "FIM", "FIA", "CIC", "CIF", "CI", "RL", "CP", "LP", "IE", "BDR", "XP", "BB", "BTG",
+           "SPX", "WHG", "EUA", "DI", "ESG", "ETF", "PIMCO", "JGP", "ARX", "AZ", "BNP", "UBS", "BV", "HSBC", "IMA",
+           "IMA-B", "IRF-M", "CDI", "ADR", "S&P", "USD", "BRL", "DTVM", "S.A.", "SA", "RF", "MM", "PB", "AM",
+           "II", "III", "IV", "VI", "VII", "VIII", "IX", "XI", "XII", "PGBL", "VGBL", "CIA", "MSCI", "NY", "US",
+           "FICFI", "FIFE", "IBRX", "IBX", "IBOV", "SMLL", "IDIV", "MLP", "LB", "LS", "LO", "AI", "TOP", "FOF"}
+
+
+def abreviar(nome):
+    """Nome completo com abreviações de mercado (FIF, FIC, RL, CP…), sem cortar palavras que distinguem fundos."""
+    s = " " + _re.sub(r"\s+", " ", str(nome).upper().strip()) + " "
+    s = _re.sub(r"\bFI FINANCEIRO\b", "FIF", s)
+    for padrao, sub in _ABREV:
+        s = _re.sub(padrao, sub.upper(), s)
+    s = _re.sub(r"\s*-\s*(RL|CP|CI|CIC|CIF|CIA|FIC|FIF|IE)\b", r" \1", s)
+    s = _re.sub(r"\s+", " ", s).strip(" -")
+    out = []
+    for w in s.split(" "):
+        base = w.strip(",.()")
+        if base in _SIGLAS or base.upper() in {x.upper() for x in _SIGLAS} or _re.fullmatch(r"[IVX]+", base) \
+                or _re.search(r"\d", base):
+            out.append(w.upper())
+        elif base in {"DE", "DA", "DO", "DOS", "DAS", "E", "EM"}:
+            out.append(w.lower())
+        else:
+            sig = {x.upper() for x in _SIGLAS}
+            out.append("-".join(x.upper() if x.strip(",.()") in sig or _re.search(r"\d", x) else x.capitalize()
+                                for x in w.split("-")))
+    r = " ".join(out)
+    return r[:1].upper() + r[1:]
+
+
+def curto(nome, n=60):
+    s = abreviar(nome)
     return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+
+
+def nome_td(nome, n=46):
+    """Célula de nome para os painéis: abreviado, com o nome completo ao passar o mouse."""
+    return f'<span title="{esc(nome)}">{esc(curto(nome, n))}</span>'
 
 
 def apelido(cnpj, nome):
@@ -152,7 +196,8 @@ table.t th {{ font-size:.68rem; font-weight:600; color:{COR["cinza"]}; text-tran
 table.t td {{ padding:4px 8px; text-align:right; border:0 !important; border-bottom:1px solid #EDF2F6 !important;
   white-space:nowrap; font-variant-numeric: tabular-nums; vertical-align:middle; height:26px; }}
 table.t th.l, table.t td.l {{ text-align:left; }}
-table.t td.l {{ color:{COR["tinta"]}; overflow:hidden; text-overflow:ellipsis; max-width:260px; }}
+table.t td.l {{ color:{COR["tinta"]}; overflow:hidden; text-overflow:ellipsis; max-width:360px; }}
+table.t td.l span[title] {{ cursor:help; }}
 table.t td.l b {{ color:{COR["marinho"]}; }}
 table.t td.s {{ color:{COR["cinza"]}; font-size:.74rem; }}
 table.t tr:nth-child(even) td {{ background:{COR["zebra"]}; }}
@@ -624,7 +669,7 @@ def painel_lista(v, maiores, n=10):
     j = jref
     t = v.nlargest(n, f"previa_{j}") if maiores else v.nsmallest(n, f"previa_{j}")
     escala = escala_de(t[f"previa_{j}_min"], t[f"previa_{j}_max"])
-    linhas = [[td(esc(curto(r["Nome"], 30)), "l"), td(esc(r["Estrategia"][:11]), "html", extra="s"),
+    linhas = [[td(nome_td(r["Nome"], 48), "l"), td(esc(r["Estrategia"][:11]), "html", extra="s"),
                td(r[f"previa_{j}"], extra="v"),
                td(faixa_svg(r[f"previa_{j}_min"], r[f"previa_{j}"], r[f"previa_{j}_max"], escala, 90), "html")]
               for _, r in t.iterrows()]
@@ -641,7 +686,7 @@ def painel_alertas(df, v, n=10):
                              ["Janelas divergem", "Cota atrasada", "R² baixo"], "")
     al["ordem"] = al["motivo"].map({"Janelas divergem": 0, "Cota atrasada": 1, "R² baixo": 2})
     al = al.sort_values(["ordem", "amplitude_janelas"], ascending=[True, False]).head(n)
-    linhas = [[td(esc(curto(r["Nome"], 28)), "l"), td(esc(r["motivo"]), "html", extra="s"),
+    linhas = [[td(nome_td(r["Nome"], 44), "l"), td(esc(r["motivo"]), "html", extra="s"),
                td(r["amplitude_janelas"], "pctu"), td(r[f"r2_{j}"], "num", 2)] for _, r in al.iterrows()]
     total = int(((v["amplitude_janelas"] >= lim) | (v[f"r2_{j}"] < 0.4) | (v["dias_desde_base"] > 2)).sum())
     corpo = tabela([("Fundo", "l"), ("Motivo", "r"), ("Diverg.", "r"), ("R²", "r")], linhas) if linhas else \
@@ -686,8 +731,9 @@ def aba_monitor(v):
     j = jref
     rr = REAL.reindex(v["chave"])
     t = pd.DataFrame({
-        "Fundo": v["Nome"].map(lambda n: curto(n, 46)).values, "Estratégia": v["Estrategia"].values,
-        "Gestor": v["Gestor"].astype(str).map(lambda n: curto(n, 24)).values, "PL mi": (v["pl"] / 1e6).values,
+        "Fundo": [abreviar(n) + (f" · {sb}" if sb else "") for n, sb in zip(v["Nome"], v["Subclasse"].fillna(""))],
+        "Estratégia": v["Estrategia"].values, "Classe ANBIMA": v["Classe_ANBIMA"].values,
+        "Gestor": v["Gestor"].astype(str).map(abreviar).values, "PL mi": (v["pl"] / 1e6).values,
         f"Prévia {rot(j)}": v[f"previa_{j}"].values, "Mín 95%": v[f"previa_{j}_min"].values,
         "Máx 95%": v[f"previa_{j}_max"].values,
         **{f"{rot(k)}": v[f"previa_{k}"].values for k in TODAS if k != j},
@@ -696,7 +742,9 @@ def aba_monitor(v):
         "6M": rr["r_6M"].values, "Ano": rr["r_Ano"].values, "12M ac.": rr["r_12M"].values,
         "% CDI 12M": rr["pcdi_12M"].values,
         "Cota est.": v[f"cota_est_{j}"].values, "Última": v["data_base"].dt.strftime("%d/%m").values,
-        "CNPJ": v["CNPJ"].values,
+        "CNPJ": v["CNPJ"].values, "Subclasse": v["Subclasse"].fillna("").values,
+        "Administrador": v["Administrador"].astype(str).map(abreviar).values,
+        "Denominação social": v["Nome"].values,
     })
     chave = {"Prévia (maior)": (f"Prévia {rot(j)}", False), "Prévia (menor)": (f"Prévia {rot(j)}", True),
              "PL": ("PL mi", False), "Divergência": ("Diverg.", False), "R²": ("R²", False),
@@ -709,8 +757,11 @@ def aba_monitor(v):
                            "PL mi": num, "Cota est.": lambda x: num(x, 6), "R²": lambda x: num(x, 2)}, na_rep="–")
            .map(cor_sinal, subset=pcols).bar(subset=["R²"], color="#CFE6F0", vmin=0, vmax=1))
     st.dataframe(sty, hide_index=True, width="stretch", height=560,
-                 column_config={"Fundo": st.column_config.TextColumn(width="large"),
-                                "Gestor": st.column_config.TextColumn(width="medium")})
+                 column_config={"Fundo": st.column_config.TextColumn(width=420, pinned=True),
+                                "Gestor": st.column_config.TextColumn(width=300),
+                                "Classe ANBIMA": st.column_config.TextColumn(width=170),
+                                "Administrador": st.column_config.TextColumn(width=230),
+                                "Denominação social": st.column_config.TextColumn(width=600)})
     agora_txt = _agora_br().strftime("%Y%m%d_%H%M")
     b1, b2, b3 = st.columns([1, 1, 6])
     b1.download_button("Excel", para_excel(t), f"previa_{agora_txt}.xlsx",
@@ -724,7 +775,8 @@ def aba_monitor(v):
 def aba_fundo(v):
     casa = v["CNPJ"].isin(pv.FUNDOS_INCLUIR)
     op = v.assign(_c=(~casa).astype(int)).sort_values(["_c", "pl"], ascending=[True, False])
-    rotulos = dict(zip(op["chave"], op["Nome"].map(lambda n: curto(n, 70)) + "  ·  " + op["CNPJ"]))
+    rotulos = dict(zip(op["chave"], [abreviar(n) + (f" · {sb}" if sb else "") + f"  ·  {c}"
+                                     for n, sb, c in zip(op["Nome"], op["Subclasse"].fillna(""), op["CNPJ"])]))
     sel = st.selectbox("Fundo", list(rotulos), format_func=rotulos.get, index=0 if len(rotulos) else None,
                        label_visibility="collapsed")
     if not sel:
@@ -739,10 +791,10 @@ def aba_fundo(v):
                td("" if k == "comb" else pct(f[f"peso_{k}"], 0, False), "html"), td(f[f"r2_{k}"], "num", 2)]
               for k in TODAS]
     c1, c2 = st.columns([1.35, 1])
-    html_bloco(painel(curto(f["Nome"], 60), tabela(
+    html_bloco(painel(abreviar(f["Nome"]) + (f" · {f['Subclasse']}" if f["Subclasse"] else ""), tabela(
         [("Modelo", "l"), ("Prévia", "r"), ("Faixa 95%", "r"), ("Mín", "r"), ("Máx", "r"), ("Cota est.", "r"),
          ("Peso", "r"), ("R²", "r")], linhas, ["casa grande"] + ["grande"] * (len(linhas) - 1)),
-        f'{esc(f["Estrategia"])} · {esc(curto(str(f["Gestor"]), 30))}',
+        f'{esc(f["Estrategia"])} · {esc(f["Classe_ANBIMA"])} · {esc(abreviar(str(f["Gestor"])))} · {esc(f["CNPJ"])}',
         f'Última cota {num(f["cota_base"], 6)} em {data_br(f["data_base"])}. Realizado: dia {pct(rr.get("r_dia"))}, '
         f'mês {pct(rr.get("r_mes"))}, ano {pct(rr.get("r_ano"))}. PL R$ {num(f["pl"] / 1e6)} mi.'), c1)
     b = bet[bet["chave"] == f["chave"]].set_index("janela").reindex(JAN)
@@ -814,8 +866,8 @@ def aba_qualidade():
         "Cobertura: % dos dias em que o realizado caiu dentro da faixa calibrada; em vermelho, desvio acima de 3 pontos. "
         "Sinal: % dos dias em que a prévia acertou o lado do retorno contra o CDI."), c2)
     pior = (pf.rename("e").to_frame().join(univ.set_index("chave")[["Nome", "Estrategia", "Gestor"]]).nlargest(12, "e"))
-    lin = [[td(esc(curto(x["Nome"], 50)), "l"), td(esc(x["Estrategia"]), "html", extra="s"),
-            td(esc(curto(str(x["Gestor"]), 30)), "html", extra="s"), td(x["e"], "num")] for _, x in pior.iterrows()]
+    lin = [[td(nome_td(x["Nome"], 90), "l"), td(esc(x["Estrategia"]), "html", extra="s"),
+            td(esc(abreviar(str(x["Gestor"]))), "html", extra="s"), td(x["e"], "num")] for _, x in pior.iterrows()]
     html_bloco(painel("Fundos que o modelo explica pior", tabela(
         [("Fundo", "l"), ("Estratégia", "r"), ("Gestor", "r"), ("Erro bps", "r")], lin), "modelo combinado"))
 
