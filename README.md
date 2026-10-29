@@ -35,12 +35,23 @@ Sem comando, roda tudo.
 streamlit run painel.py
 ```
 
-O painel tem quatro abas:
-- **Visão geral:** fatores do dia, prévia por estratégia, maiores altas e quedas, e alertas (janelas
-  divergindo, ajuste fraco, cota CVM atrasada).
-- **Fundos:** a tabela completa, com download em Excel ou CSV.
-- **Fundo:** prévias e ICs por janela, pesos da combinada, βs, e o gráfico de real contra prévia com IC.
-- **Qualidade do modelo:** erro e cobertura do IC (teórica e calibrada) por estratégia, e os fundos com maior erro.
+Visão executiva, de cima para baixo:
+- **Destaque:** a prévia de hoje do Hedge Alternative Master, com a faixa de 95% e a cota estimada.
+  Ao lado, as classes feeder (FICFI, W FIC e Prev FIC).
+- **Resumo do dia** em uma frase: mercado e mediana por estratégia.
+- **Fatores do dia**, com destaque para os que foram preenchidos manualmente.
+- **Estratégias hoje:** mediana, dispersão entre fundos (barra com 80% dos fundos) e quantos sobem e caem.
+
+Abas de detalhe:
+- **Destaques:** maiores altas e quedas previstas e pontos de atenção (janelas divergindo, ajuste fraco,
+  cota CVM atrasada).
+- **Todos os fundos:** tabela completa, com download em Excel ou CSV.
+- **Fundo:** a prévia de cada modelo com sua faixa, os pesos da combinada, o mapa de sensibilidades e o
+  gráfico da prévia contra o realizado.
+- **Qualidade do modelo:** erro e cobertura do intervalo por estratégia e modelo, e os fundos que o
+  modelo explica pior.
+
+Filtros e atualização ficam na barra lateral, fechada por padrão. Números em formato brasileiro (vírgula decimal).
 
 Seção **Atualização** na barra lateral:
 - **Atualizar preços agora:** consulta o Yahoo na hora. Fora isso, os preços ficam em cache por 30 s.
@@ -74,6 +85,12 @@ Por fundo e janela, em log-retornos:
 |---|---|
 | Long Only, Long Biased, Long Short | IBOV, SMAL11, S&P 500, dólar, XFIX11 |
 | Macro | IBOV, S&P 500, dólar, IRFM11, IMAB11, XFIX11 |
+| Hedge Alternative | todos: IBOV, SMAL11, S&P 500, dólar, IRFM11, IMAB11, XFIX11 |
+
+`FUNDOS_INCLUIR` (topo do `previa.py`) força fundos no universo com estratégia própria, ignorando classe,
+PL mínimo e exclusividade. Vem com os 4 fundos da Hedge Alternative Investments (Master, FICFI, W FIC e
+Prev FIC), que têm uma aba própria no painel. Para acompanhar outro fundo, inclua o CNPJ e a estratégia
+e, se for uma estratégia nova, os fatores dela em `FATORES_ESTRATEGIA`.
 
 ## Configuração (topo de `previa.py`)
 

@@ -44,7 +44,18 @@ FATORES_ESTRATEGIA = {
     "Long Biased": ["IBOV", "SMLL", "SPX", "USD", "IFIX"],
     "Long Short":  ["IBOV", "SMLL", "SPX", "USD", "IFIX"],
     "Macro":       ["IBOV", "SPX", "USD", "IRFM", "IMAB", "IFIX"],
+    "Hedge Alternative": ["IBOV", "SMLL", "SPX", "USD", "IRFM", "IMAB", "IFIX"],
 }
+# Fundos incluídos sempre, com estratégia própria (ignoram classe, PL mínimo e exclusividade).
+FUNDOS_INCLUIR = {
+    "35.377.516/0001-34": "Hedge Alternative",   # Master FIM CP
+    "06.867.811/0001-70": "Hedge Alternative",   # FICFI Multimercado CP
+    "35.372.302/0001-75": "Hedge Alternative",   # W FIC Multi CP
+    "42.195.744/0001-59": "Hedge Alternative",   # Prev Multimercado FIC CP
+}
+APELIDOS = {"35.377.516/0001-34": "Master", "06.867.811/0001-70": "FICFI",
+            "35.372.302/0001-75": "W FIC", "42.195.744/0001-59": "Prev FIC"}
+ORDEM_ESTRATEGIAS = ["Long Only", "Long Biased", "Long Short", "Macro", "Hedge Alternative"]
 # Opcional: dados/fatores_extra.csv com coluna "data" e uma coluna por fator.
 # Prefixo TX_ = taxa (variação em p.p.); demais = preço.
 EXTRA_CSV = DADOS / "fatores_extra.csv"
@@ -201,12 +212,16 @@ def ler_informes(cnpjs: set[str]) -> pd.DataFrame:
 
 def montar_universo() -> tuple[pd.DataFrame, pd.DataFrame]:
     cad = ler_cadastro()
+    forc = [c for c in FUNDOS_INCLUIR if c in cad.index]
+    cad.loc[forc, "Estrategia"] = [FUNDOS_INCLUIR[c] for c in forc]
+    cad.loc[forc, "Elegivel"] = True
     eleg = cad[cad["Elegivel"]]
-    _log(f"Cadastro: {len(cad):,} classes, {len(eleg):,} elegíveis nas 4 estratégias")
+    _log(f"Cadastro: {len(cad):,} classes, {len(eleg):,} elegíveis ({len(forc)} incluídos manualmente)")
     cot = ler_informes(set(eleg.index))
     ult = cot.groupby(["CNPJ", "SUB"]).agg(
         data_ult=("data", "max"), pl=("pl", "last"), dias=("data", "nunique")).reset_index()
-    ult = ult[(ult["pl"] >= PL_MINIMO) & (ult["dias"] >= DIAS_MIN_HISTORICO)
+    fixo = ult["CNPJ"].isin(FUNDOS_INCLUIR)
+    ult = ult[(fixo | (ult["pl"] >= PL_MINIMO)) & (ult["dias"] >= DIAS_MIN_HISTORICO)
               & (ult["data_ult"] >= cot["data"].max() - pd.Timedelta(days=7))]
     ult = ult.join(eleg[["Nome", "Estrategia", "Classe_ANBIMA", "Gestor", "Administrador"]], on="CNPJ")
     ult["Subclasse"] = ult["SUB"].map(cad.attrs["subclasses"]).fillna("")
@@ -635,6 +650,12 @@ def carregar_calibracao() -> pd.DataFrame | None:
     return pd.read_parquet(p) if p.exists() else None
 
 
+def ordenar_estrategias(presentes) -> list[str]:
+    presentes = set(presentes)
+    base = ["Todas"] + ORDEM_ESTRATEGIAS
+    return [e for e in base if e in presentes] + sorted(presentes - set(base))
+
+
 def rot(j: str) -> str:
     return "combinada" if j == "comb" else j
 
@@ -933,7 +954,7 @@ def backtest(desde: str | None = None, grafico: bool = True, retornar: bool = Fa
           f"{ok['data'].min():%d/%m/%Y} a {ok['data'].max():%d/%m/%Y}"
           + (f" (sem {', '.join(DATAS_EXCLUIR)})" if DATAS_EXCLUIR else ""))
     r = resumir_backtest(ok)
-    ordem = [o for o in ["Todas", "Long Only", "Long Biased", "Long Short", "Macro"] if o in set(r["Estrategia"])]
+    ordem = ordenar_estrategias(set(r["Estrategia"]))
     js = todas_janelas()
     modelos = js + ["média", "só CDI"]
     erro = r.pivot(index="Estrategia", columns="Modelo", values="MAE_bps").reindex(ordem)[modelos]
