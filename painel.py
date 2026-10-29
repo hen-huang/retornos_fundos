@@ -484,8 +484,8 @@ def _base_desatualizada() -> bool:
 
 if not (pv.DADOS / "betas.parquet").exists():
     html_bloco('<div class="topo"><div class="marca">Hedge Investments<span>Prévia de cotas</span></div></div>')
-    st.info("Primeira execução: montando a base com 12 meses de cotas da CVM, cadastro, fatores e CDI. "
-            "Leva alguns minutos e acontece uma vez por dia.")
+    st.info("Primeira execução: montando a base com 36 meses de cotas da CVM (37 arquivos, cerca de 400 MB), "
+            "cadastro, fatores e CDI. Leva de 5 a 10 minutos na primeira vez; depois, só os 2 últimos meses são baixados.")
     atualizar_base("Montando a base")
     st.stop()
 

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 
@@ -27,6 +29,7 @@ except NameError:
     DADOS = Path.cwd() / "dados"
 CVM_DIR = DADOS / "cvm"
 MESES_HISTORICO = 37             # 36M completos + mês corrente (CVM publica mensais desde 2021)
+DOWNLOADS_PARALELOS = 4
 PL_MINIMO = 100e6
 DIAS_MIN_HISTORICO = 120
 
@@ -123,20 +126,31 @@ def _session():
     return s
 
 
-def baixar(url: str, destino: Path, forcar: bool = False) -> bool:
-    if destino.exists() and not forcar:
+def baixar(url: str, destino: Path, forcar: bool = False, tentativas: int = 3) -> bool:
+    zipado = destino.suffix == ".zip"
+    if destino.exists() and not forcar and (not zipado or zipfile.is_zipfile(destino)):
         return True
     destino.parent.mkdir(parents=True, exist_ok=True)
-    r = _session().get(url, timeout=180, stream=True)
-    if r.status_code == 404:
-        return False
-    r.raise_for_status()
     tmp = destino.with_suffix(destino.suffix + ".part")
-    with open(tmp, "wb") as f:
-        for chunk in r.iter_content(1 << 20):
-            f.write(chunk)
-    tmp.replace(destino)
-    return True
+    for t in range(tentativas):
+        try:
+            r = _session().get(url, timeout=300, stream=True)
+            if r.status_code == 404:
+                return False
+            r.raise_for_status()
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+            if zipado and not zipfile.is_zipfile(tmp):
+                raise IOError(f"arquivo corrompido: {url}")
+            tmp.replace(destino)
+            return True
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            if t == tentativas - 1:
+                raise
+            time.sleep(3 * (t + 1))
+    return False
 
 
 def _meses(n: int, hoje: date | None = None) -> list[str]:
@@ -204,16 +218,95 @@ def ler_cadastro() -> pd.DataFrame:
     return cad_all.set_index("CNPJ")
 
 
-def ler_informes(cnpjs: set[str]) -> pd.DataFrame:
+def _mapa_fundo_classe() -> dict[str, str]:
+    """CNPJ do fundo -> CNPJ da classe, para fundos de classe única que mudaram de CNPJ na RCVM 175.
+
+    Antes da adaptação o informe vinha por fundo (CNPJ_FUNDO); depois, por classe (CNPJ_FUNDO_CLASSE).
+    Com o mapa, o histórico antigo emenda no da classe.
+    """
+    p = DADOS / "registro_fundo_classe.zip"
+    if not p.exists():
+        return {}
+    kw = dict(sep=";", dtype=str, encoding="latin1")
+    with zipfile.ZipFile(p) as z:
+        cl = pd.read_csv(z.open("registro_classe.csv"), usecols=["ID_Registro_Fundo", "CNPJ_Classe"], **kw)
+        fu = pd.read_csv(z.open("registro_fundo.csv"), usecols=["ID_Registro_Fundo", "CNPJ_Fundo"], **kw)
+    m = cl.merge(fu, on="ID_Registro_Fundo").dropna()
+    m = m[m.groupby("ID_Registro_Fundo")["CNPJ_Classe"].transform("size") == 1]
+    f, c = m["CNPJ_Fundo"].map(_fmt_cnpj), m["CNPJ_Classe"].map(_fmt_cnpj)
+    return dict(zip(f[f != c], c[f != c]))
+
+
+def _cnpj_padrao(s: pd.Series) -> pd.Series:
+    s = s.str.strip()
+    so_digitos = s.str.len() < 18
+    if so_digitos.any():
+        s = s.where(~so_digitos, s.map(_fmt_cnpj))
+    return s
+
+
+def _ler_informe(zp: Path, alvo: set[str], mapa: dict[str, str]) -> list[pd.DataFrame]:
     cols = {"CNPJ_FUNDO_CLASSE", "CNPJ_FUNDO", "ID_SUBCLASSE", "DT_COMPTC", "VL_QUOTA", "VL_PATRIM_LIQ"}
     out = []
+    with zipfile.ZipFile(zp) as z:
+        for nm in z.namelist():
+            if not nm.lower().endswith(".csv"):
+                continue
+            df = pd.read_csv(z.open(nm), sep=";", dtype=str, usecols=lambda c: c in cols, encoding="latin1")
+            novo = "CNPJ_FUNDO_CLASSE" in df
+            cnpj = _cnpj_padrao(df["CNPJ_FUNDO_CLASSE" if novo else "CNPJ_FUNDO"])
+            df = df.drop(columns=["CNPJ_FUNDO_CLASSE", "CNPJ_FUNDO"], errors="ignore")
+            if not novo and mapa:
+                cnpj = cnpj.map(mapa).fillna(cnpj)
+            df["CNPJ"] = cnpj
+            df["antigo"] = not novo
+            out.append(df[cnpj.isin(alvo)])
+    return out
+
+
+def _emendar(d: pd.DataFrame) -> pd.DataFrame:
+    """Na troca do formato antigo (fundo) para o novo (classe), reescala o trecho antigo se a cota saltar."""
+    mist = d.groupby(["CNPJ", "SUB"])["antigo"].transform("nunique") > 1
+    if not mist.any():
+        return d
+    for (c, s), g in d[mist].groupby(["CNPJ", "SUB"]):
+        ant, nov = g[g["antigo"]], g[~g["antigo"]]
+        nov = nov[nov["data"] > ant["data"].max()]
+        if nov.empty:
+            continue
+        salto = nov["cota"].iloc[0] / ant["cota"].iloc[-1] - 1
+        if abs(salto) > RET_MAX_ABS:
+            d.loc[ant.index, "cota"] *= nov["cota"].iloc[0] / ant["cota"].iloc[-1]
+    return d
+
+
+def _emendar_subclasses(d: pd.DataFrame, salto_max: float = 0.03, dias_max: int = 10) -> pd.DataFrame:
+    """Leva o histórico da classe sem subclasse (anterior à adaptação) para a subclasse que continua a cota."""
+    sem = d[d["SUB"] == ""].groupby("CNPJ").agg(fim=("data", "max"))
+    com = d[d["SUB"] != ""].groupby(["CNPJ", "SUB"]).agg(ini=("data", "min")).reset_index()
+    com = com[com["CNPJ"].isin(sem.index)]
+    if com.empty:
+        return d
+    ult = d[d["SUB"] == ""].groupby("CNPJ")["cota"].last()
+    pri = d[d["SUB"] != ""].groupby(["CNPJ", "SUB"])["cota"].first()
+    com = com.join(sem, on="CNPJ")
+    com = com[(com["ini"] > com["fim"]) & ((com["ini"] - com["fim"]).dt.days <= dias_max)]
+    com["salto"] = (com.set_index(["CNPJ", "SUB"]).index.map(pri).to_numpy() / com["CNPJ"].map(ult) - 1).abs()
+    com = com[com["salto"] <= salto_max].sort_values("salto").drop_duplicates("CNPJ")
+    if com.empty:
+        return d
+    alvo = d["CNPJ"].map(com.set_index("CNPJ")["SUB"])
+    mover = (d["SUB"] == "") & alvo.notna()
+    d.loc[mover, "SUB"] = alvo[mover]
+    _log(f"Histórico anterior à adaptação emendado em {len(com)} subclasse(s)")
+    return d
+
+
+def ler_informes(cnpjs: set[str]) -> pd.DataFrame:
+    mapa = {f: c for f, c in _mapa_fundo_classe().items() if c in cnpjs}
+    out = []
     for zp in sorted(CVM_DIR.glob("inf_diario_fi_*.zip")):
-        with zipfile.ZipFile(zp) as z:
-            for nm in z.namelist():
-                if nm.lower().endswith(".csv"):
-                    df = pd.read_csv(z.open(nm), sep=";", dtype=str, usecols=lambda c: c in cols)
-                    df = df.rename(columns={"CNPJ_FUNDO_CLASSE": "CNPJ", "CNPJ_FUNDO": "CNPJ"})
-                    out.append(df[df["CNPJ"].isin(cnpjs)])
+        out += _ler_informe(zp, cnpjs, mapa)
     if not out:
         raise SystemExit("Nenhum informe diário em dados/cvm. Rode pv.atualizar().")
     d = pd.concat(out, ignore_index=True)
@@ -225,9 +318,15 @@ def ler_informes(cnpjs: set[str]) -> pd.DataFrame:
         "data": pd.to_datetime(d["DT_COMPTC"]),
         "cota": pd.to_numeric(d["VL_QUOTA"], errors="coerce"),
         "pl": pd.to_numeric(d["VL_PATRIM_LIQ"], errors="coerce"),
+        "antigo": d["antigo"].astype(bool),
     })
-    d = d[d["cota"] > 0].drop_duplicates(["CNPJ", "SUB", "data"], keep="last")
-    return d.sort_values(["CNPJ", "SUB", "data"], ignore_index=True)
+    d = d[d["cota"] > 0].sort_values(["CNPJ", "SUB", "data", "antigo"], ascending=[True, True, True, False])
+    d = d.drop_duplicates(["CNPJ", "SUB", "data"], keep="first").reset_index(drop=True)
+    d = _emendar(d)
+    d = _emendar_subclasses(d)
+    _log(f"Informes: {d['data'].min():%d/%m/%Y} a {d['data'].max():%d/%m/%Y}, "
+         f"{d['data'].dt.to_period('M').nunique()} meses")
+    return d.drop(columns="antigo").sort_values(["CNPJ", "SUB", "data"], ignore_index=True)
 
 
 def montar_universo() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -914,16 +1013,32 @@ def _rotulo(r) -> str:
 
 
 def atualizar(forcar: bool = False):
-    """Baixa CVM (12 meses e cadastro), fatores no Yahoo e CDI no Banco Central."""
+    """Baixa CVM (36 meses de informes e cadastro), fatores no Yahoo e CDI no Banco Central."""
     DADOS.mkdir(exist_ok=True)
     meses = _meses(MESES_HISTORICO)
-    for i, ym in enumerate(meses):
-        ok = baixar(URL_INFORME.format(ym=ym), CVM_DIR / f"inf_diario_fi_{ym}.zip",
-                    forcar=forcar or i >= len(meses) - 2)
-        _log(f"Informe {ym}: {'ok' if ok else 'não publicado'}")
+    _log(f"Informes da CVM: {meses[0]} a {meses[-1]} ({len(meses)} meses)")
+
+    def um(i_ym):
+        i, ym = i_ym
+        try:
+            return ym, baixar(URL_INFORME.format(ym=ym), CVM_DIR / f"inf_diario_fi_{ym}.zip",
+                              forcar=forcar or i >= len(meses) - 2)
+        except Exception as e:
+            return ym, e
+
+    falhas = []
+    with ThreadPoolExecutor(DOWNLOADS_PARALELOS) as ex:
+        for ym, ok in ex.map(um, enumerate(meses)):
+            if isinstance(ok, Exception):
+                falhas.append(ym)
+                _log(f"Informe {ym}: falhou ({ok})")
+            else:
+                _log(f"Informe {ym}: {'ok' if ok else 'não publicado'}")
     for z in CVM_DIR.glob("inf_diario_fi_*.zip"):
         if z.stem[-6:] not in meses:
             z.unlink()
+    if falhas:
+        _log(f"Aviso: {len(falhas)} mês(es) sem download ({', '.join(falhas)}). Rode pv.atualizar() de novo.")
     baixar(URL_REGISTRO, DADOS / "registro_fundo_classe.zip", forcar=True)
     baixar(URL_CAD_FI, DADOS / "cad_fi.csv", forcar=True)
     univ, cot = montar_universo()

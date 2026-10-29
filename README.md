@@ -115,6 +115,20 @@ PL mínimo e exclusividade. Vem com os 4 fundos da Hedge Alternative Investments
 Prev FIC), que têm uma aba própria no painel. Para acompanhar outro fundo, inclua o CNPJ e a estratégia
 e, se for uma estratégia nova, os fatores dela em `FATORES_ESTRATEGIA`.
 
+## Histórico de cotas (36 meses)
+
+`pv.atualizar()` baixa `MESES_HISTORICO` (37) informes mensais da CVM, em paralelo
+(`DOWNLOADS_PARALELOS` = 4) e com até 3 tentativas por arquivo. Os meses já baixados ficam em
+`dados/cvm` e não são baixados de novo, exceto os 2 últimos (a CVM ainda os revisa). A primeira
+carga tem cerca de 400 MB.
+
+Os informes anteriores à adaptação à RCVM 175 vinham por fundo (`CNPJ_FUNDO`), e os atuais vêm por
+classe e subclasse (`CNPJ_FUNDO_CLASSE`, `ID_SUBCLASSE`). A leitura junta os dois formatos:
+- fundo de classe única que ganhou CNPJ novo: o histórico do CNPJ antigo passa para a classe, pelo
+  cadastro da CVM; se a cota recomeçou em outro patamar, o trecho antigo é reescalado;
+- classe que passou a ter subclasses: o histórico anterior vai para a subclasse que continua a cota
+  (salto de até 3% em até 10 dias). As demais subclasses têm histórico só desde a criação.
+
 ## Configuração (topo de `previa.py`)
 
 - `JANELAS`, `MIN_OBS`, `JANELA_PRINCIPAL`
