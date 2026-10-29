@@ -35,23 +35,21 @@ Sem comando, roda tudo.
 streamlit run painel.py
 ```
 
-Visão executiva, de cima para baixo:
-- **Destaque:** a prévia de hoje do Hedge Alternative Master, com a faixa de 95% e a cota estimada.
-  Ao lado, as classes feeder (FICFI, W FIC e Prev FIC).
-- **Resumo do dia** em uma frase: mercado e mediana por estratégia.
-- **Fatores do dia**, com destaque para os que foram preenchidos manualmente.
-- **Estratégias hoje:** mediana, dispersão entre fundos (barra com 80% dos fundos) e quantos sobem e caem.
+Layout de estação de trabalho, em painéis uniformes:
+- **Barra superior:** data, status dos preços (ao vivo ou último fechamento), base do dia, última cota CVM,
+  modelo e número de fundos.
+- **Hedge Alternative Investments:** prévia de hoje de Master, FICFI, W FIC e Prev FIC, com faixa de 95%,
+  cota estimada, retorno realizado (último dia, mês e ano, pela CVM) e PL.
+- **Rentabilidade acumulada (Hedge Alternative):** retorno pela cota oficial da CVM no dia, semana, mês,
+  1M, 3M, 6M, ano e 12M; CDI do mesmo período; % do CDI no ano e em 12M; e mês, ano e 12M "com a prévia",
+  que encadeiam o retorno estimado desde a última cota até agora.
+- **Mercado:** cada fator com o último valor e a variação no dia, em 5 pregões, no mês e no ano.
+- **Estratégias:** mediana, P10–P90 entre fundos e quantos sobem e caem.
+- **Maiores altas, maiores quedas e atenção** (janelas divergindo, cota atrasada, R² baixo).
+- Abas **Monitor de fundos** (tabela completa com busca, ordenação e exportação para Excel/CSV), **Fundo**
+  (modelos, sensibilidades, gráfico de prévia × realizado) e **Qualidade do modelo**.
 
-Abas de detalhe:
-- **Destaques:** maiores altas e quedas previstas e pontos de atenção (janelas divergindo, ajuste fraco,
-  cota CVM atrasada).
-- **Todos os fundos:** tabela completa, com download em Excel ou CSV.
-- **Fundo:** a prévia de cada modelo com sua faixa, os pesos da combinada, o mapa de sensibilidades e o
-  gráfico da prévia contra o realizado.
-- **Qualidade do modelo:** erro e cobertura do intervalo por estratégia e modelo, e os fundos que o
-  modelo explica pior.
-
-Filtros e atualização ficam na barra lateral, fechada por padrão. Números em formato brasileiro (vírgula decimal).
+Filtros, modelo de referência e atualização ficam na barra lateral, fechada por padrão.
 
 Seção **Atualização** na barra lateral:
 - **Atualizar preços agora:** consulta o Yahoo na hora. Fora isso, os preços ficam em cache por 30 s.
@@ -63,6 +61,15 @@ Usa a paleta Hedge Investments (marinho #0A4263, azul #00A0D7, celeste #81C1D7) 
 Se a fonte estiver instalada no computador, o painel a usa direto. Se não, coloque os arquivos em
 `static/fonts/`. As cores do tema ficam em `.streamlit/config.toml`, e a paleta completa em `PALETA`,
 no `painel.py`.
+
+## Rentabilidade acumulada
+
+`pv.retornos_acumulados(cot, cdi)` calcula, para cada fundo, o retorno da última cota da CVM contra a
+cota da data-base de cada janela (`JANELAS_ACUM`): Dia, Semana (7 dias corridos), Mês (desde o fim do mês
+anterior), 1M, 3M, 6M (meses corridos), Ano (desde 31/12) e 12M. Também traz o CDI do mesmo período e o
+% do CDI. Se o histórico do fundo começar até `TOLERANCIA_INICIO` (10) dias depois da data-base ideal,
+usa a primeira cota disponível, e a data usada fica em `base_<janela>`. A atualização baixa 14 meses de
+informes para que os 12M fiquem completos. O `pv.consolidado()` inclui essas colunas.
 
 ## Modelo
 

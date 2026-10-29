@@ -26,7 +26,7 @@ try:
 except NameError:
     DADOS = Path.cwd() / "dados"
 CVM_DIR = DADOS / "cvm"
-MESES_HISTORICO = 13
+MESES_HISTORICO = 14             # 12M completos + mês corrente
 PL_MINIMO = 100e6
 DIAS_MIN_HISTORICO = 120
 
@@ -634,6 +634,74 @@ def calcular_previa(univ, cot, bet, px, cdi, agora: pd.Series, hoje=None, com_al
     return df.reset_index()
 
 
+# Rentabilidade acumulada (cota CVM)
+JANELAS_ACUM = ["Dia", "Semana", "Mês", "1M", "3M", "6M", "Ano", "12M"]
+TOLERANCIA_INICIO = 10   # dias: aceita a primeira cota disponível se ela estiver até 10 dias depois do início ideal
+
+
+def _alvo(ref: pd.Timestamp, janela: str) -> pd.Timestamp:
+    """Data-base da janela: o retorno é medido da última cota até essa data (inclusive) até a cota de ref."""
+    if janela == "Semana":
+        return ref - pd.Timedelta(days=7)
+    if janela == "Mês":
+        return ref.replace(day=1) - pd.Timedelta(days=1)
+    if janela == "Ano":
+        return ref.replace(month=1, day=1) - pd.Timedelta(days=1)
+    meses = {"1M": 1, "3M": 3, "6M": 6, "12M": 12}[janela]
+    return ref - pd.DateOffset(months=meses)
+
+
+def retornos_acumulados(cot: pd.DataFrame, cdi: pd.Series) -> pd.DataFrame:
+    """Por fundo, retorno acumulado pela cota CVM em cada janela de JANELAS_ACUM, CDI do mesmo período,
+    % do CDI e a data-base usada. Colunas: r_<janela>, cdi_<janela>, pcdi_<janela>, base_<janela>."""
+    c = cot.sort_values(["chave", "data"])
+    P = c.pivot(index="data", columns="chave", values="cota").sort_index()
+    D = pd.DataFrame(np.where(P.notna(), P.index.values[:, None], np.datetime64("NaT")),
+                     index=P.index, columns=P.columns).ffill()
+    Pf = P.ffill()
+    primeiro = P.apply(lambda s: s.first_valid_index())
+    ult = c.groupby("chave").tail(1).set_index("chave")
+    ant = c.groupby("chave").nth(-2).set_index("chave")
+    cc = np.log1p(cdi.dropna() / 100).cumsum()
+    acum_cdi = lambda d0, d1: np.exp(cc.asof(d1) - cc.asof(d0)) - 1 if pd.notna(d0) and pd.notna(d1) else np.nan
+
+    out = pd.DataFrame(index=ult.index)
+    out["cota_ult"], out["data_ult"] = ult["cota"], ult["data"]
+    out["base_Dia"] = ant["data"].reindex(out.index)
+    out["r_Dia"] = ult["cota"] / ant["cota"].reindex(out.index) - 1
+    for jan in JANELAS_ACUM[1:]:
+        r, bd = pd.Series(np.nan, index=out.index), pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns]")
+        for ref, chaves in out.groupby("data_ult").groups.items():
+            alvo = _alvo(pd.Timestamp(ref), jan)
+            ok_idx = P.index[P.index <= alvo]
+            ch = list(chaves)
+            if len(ok_idx):
+                v0, d0 = Pf.loc[ok_idx[-1], ch], D.loc[ok_idx[-1], ch]
+            else:
+                v0, d0 = pd.Series(np.nan, index=ch), pd.Series(pd.NaT, index=ch)
+            sem = v0.isna()
+            if sem.any():   # história começa depois do alvo: aceita se estiver dentro da tolerância
+                ini = primeiro[ch][sem]
+                perto = (ini - alvo) <= pd.Timedelta(days=TOLERANCIA_INICIO)
+                for k in ini[perto].index:
+                    v0[k], d0[k] = P.loc[ini[k], k], ini[k]
+            r[ch] = out.loc[ch, "cota_ult"] / v0 - 1
+            bd[ch] = pd.to_datetime(d0)
+        out[f"r_{jan}"], out[f"base_{jan}"] = r, bd
+    for jan in JANELAS_ACUM:
+        out[f"cdi_{jan}"] = [acum_cdi(b, d) for b, d in zip(out[f"base_{jan}"], out["data_ult"])]
+        out[f"pcdi_{jan}"] = out[f"r_{jan}"] / out[f"cdi_{jan}"]
+    return out
+
+
+def com_previa(acum: pd.DataFrame, prev: pd.DataFrame, jan: str = "comb") -> pd.DataFrame:
+    """Encadeia ao acumulado CVM o retorno estimado desde a última cota até hoje (cota estimada / última cota)."""
+    p = prev.set_index("chave")
+    fator = (p[f"cota_est_{jan}"] / p["cota_base"]).reindex(acum.index)
+    return pd.DataFrame({f"rp_{k}": (1 + acum[f"r_{k}"]) * fator - 1 for k in JANELAS_ACUM if k != "Dia"},
+                        index=acum.index)
+
+
 # Persistência
 def salvar_base(univ, cot):
     univ.to_parquet(DADOS / "universo.parquet", index=False)
@@ -1036,16 +1104,28 @@ def consolidado(com_backtest: bool = True, com_alfa: bool = False, salvar: str |
         out[f"Cota máx {rot(j)}"] = df[f"cota_est_{j}_max"].values
     out["R² combinado"] = df["r2_comb"].values
     out["Confiança"] = _confianca(df[f"r2_{JANELA_PRINCIPAL}"]).values
+    acum = retornos_acumulados(cot, cdi)
+    acp = com_previa(acum, df)
+    for k in JANELAS_ACUM:
+        out[f"Retorno {k}"] = acum[f"r_{k}"].reindex(out.index).values
+    for k in ("Mês", "Ano", "12M"):
+        out[f"CDI {k}"] = acum[f"cdi_{k}"].reindex(out.index).values
+        out[f"% CDI {k}"] = acum[f"pcdi_{k}"].reindex(out.index).values
+    for k in ("Mês", "Ano", "12M"):
+        out[f"Retorno {k} c/ prévia"] = acp[f"rp_{k}"].reindex(out.index).values
+    out["Início 12M"] = acum["base_12M"].reindex(out.index).values
 
     fats = [c for c in FATORES if f"b_{c}" in bet] + [c[2:] for c in bet if c.startswith("b_TX_")]
+    extra = {}
     for j in JANELAS:
         b = bet[bet["janela"] == j].set_index("chave").reindex(out.index)
-        out[f"R² {j}"] = b["r2"]
-        out[f"Erro anual {j}"] = b["te"]
-        out[f"α diário {j}"] = b["alfa"]
-        out[f"Obs. {j}"] = b["n"]
+        extra[f"R² {j}"] = b["r2"]
+        extra[f"Erro anual {j}"] = b["te"]
+        extra[f"α diário {j}"] = b["alfa"]
+        extra[f"Obs. {j}"] = b["n"]
         for fz in fats:
-            out[f"β {fz} {j}"] = b[f"b_{fz}"]
+            extra[f"β {fz} {j}"] = b[f"b_{fz}"]
+    out = pd.concat([out, pd.DataFrame(extra, index=out.index)], axis=1)
 
     if com_backtest:
         bt = _backtest_fundos(univ, cot, px, cdi)
@@ -1077,11 +1157,11 @@ def consolidado(com_backtest: bool = True, com_alfa: bool = False, salvar: str |
 
 def _salvar_excel(df: pd.DataFrame, caminho: Path) -> None:
     def formato(col):
-        if col.startswith(("Prévia", "Amplitude", "Erro anual", "Cobertura", "Peso")):
+        if col.startswith(("Prévia", "Amplitude", "Erro anual", "Cobertura", "Peso", "Retorno", "CDI ", "% CDI")):
             return "0.00%"
         if col.startswith(("Cota", "Última cota")):
             return "0.000000"
-        if col.startswith(("Data", "Base do dia")):
+        if col.startswith(("Data", "Base do dia", "Início")):
             return "dd/mm/yyyy"
         if col.startswith(("β", "R²")):
             return "0.000"
