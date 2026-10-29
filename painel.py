@@ -29,6 +29,7 @@ COR = {
     "fundo": "#EEF3F7", "zebra": "#F7FAFC",
 }
 JAN = list(getattr(pv, "MODELOS", pv.JANELAS))
+PERIODOS_GRAF = ["6M", "12M", "24M", "36M"]
 TODAS = pv.todas_janelas()
 COR_JANELA = {"1m": "#B9DCE8", "2m": COR["celeste"], "3m": COR["azul"], "6m": "#2BA9B4", "12m": COR["petroleo"],
               "24m": COR["marinho"], "ew": "#5F6B75", "EW": "#5F6B75",
@@ -370,10 +371,11 @@ def acumulados(_m):
 
 
 @st.cache_data(show_spinner=False)
-def serie_cota(_m, chave, dias=400):
+def serie_cota(_m, chave, meses=36):
     _, cot, _, _, cdi, _ = base(_m)
     s = cot[cot["chave"] == chave].set_index("data")["cota"].sort_index()
-    s = s[s.index >= s.index.max() - pd.Timedelta(days=dias)]
+    ini = s.index.max() - pd.DateOffset(months=meses)
+    s = s[s.index >= (s.index[s.index <= ini].max() if (s.index <= ini).any() else s.index[0])]
     c = np.log1p(cdi.dropna() / 100).cumsum()
     cdi_ac = np.exp(c.reindex(c.index.union(s.index)).ffill().reindex(s.index) - c.asof(s.index[0]))
     return pd.DataFrame({"Data": s.index, "Fundo": s.values / s.iloc[0] - 1, "CDI": cdi_ac.values - 1})
@@ -391,7 +393,7 @@ def qualidade(_m):
 @st.cache_data(show_spinner=False)
 def historico_fundo(_m, chave):
     univ, cot, _, px, cdi, _ = base(_m)
-    return pv._backtest_fundos(univ[univ["chave"] == chave], cot, px, cdi).tail(63)
+    return pv._backtest_fundos(univ[univ["chave"] == chave], cot, px, cdi)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -700,17 +702,19 @@ def painel_alertas(df, v, n=10):
                   f"Divergência = maior menos menor prévia entre janelas; alerta a partir de {pct(lim, sinal=False)}.")
 
 
-def grafico_real_previa(chave, j, altura=230):
-    bt = historico_fundo(M, chave)
+def grafico_real_previa(chave, j, meses=3, altura=230):
+    bt = historico_fundo(M, chave).dropna(subset=[f"prev_{j}"])
     if bt.empty:
         return None, None
+    bt = bt[bt["data"] > bt["data"].max() - pd.DateOffset(months=meses)]
     gd = pd.DataFrame({"Data": bt["data"].values, "Real": np.expm1(bt["real"].values),
                        "Prévia": np.expm1(bt[f"prev_{j}"].values),
                        "Mín": np.expm1(bt[f"ic_{j}_min"].values), "Máx": np.expm1(bt[f"ic_{j}_max"].values)})
-    x = alt.X("Data:T", title=None, axis=alt.Axis(format="%d/%m", grid=False))
+    x = alt.X("Data:T", title=None, axis=alt.Axis(format="%d/%m" if meses <= 3 else "%m/%y", grid=False,
+                                                    labelOverlap=True))
     faixa = alt.Chart(gd).mark_area(color=COR["celeste"], opacity=.35).encode(
         x=x, y=alt.Y("Mín:Q", axis=alt.Axis(format="+.1%"), title=None), y2="Máx:Q")
-    real = alt.Chart(gd).mark_bar(color=COR["marinho"], size=4).encode(
+    real = alt.Chart(gd).mark_bar(color=COR["marinho"], size=max(1, min(4, 700 / max(len(gd), 1)))).encode(
         x=x, y="Real:Q", tooltip=[alt.Tooltip("Data:T", format="%d/%m", title="Dia"),
                                   alt.Tooltip("Real:Q", format="+.2%"), alt.Tooltip("Prévia:Q", format="+.2%")])
     linha = alt.Chart(gd).mark_line(color=COR["laranja"] if j == "comb" else COR["azul"], strokeWidth=1.6).encode(
@@ -820,26 +824,43 @@ def aba_fundo(v):
     c1, c2 = st.columns([1.35, 1])
     html_bloco(painel("Rentabilidade acumulada", tabela([("", "l")] + [(k, "r") for k in jans], lin, ["casa"]),
                       f"cota CVM até {data_br(d_ref)}"), c1)
-    sc = serie_cota(M, f["chave"])
-    if len(sc) > 5:
-        longo = sc.melt(id_vars="Data", var_name="Série", value_name="Acumulado")
-        g = alt.Chart(longo).mark_line(strokeWidth=1.8).encode(
-            x=alt.X("Data:T", title=None, axis=alt.Axis(format="%m/%y", grid=False)),
-            y=alt.Y("Acumulado:Q", title=None, axis=alt.Axis(format="+.0%")),
-            color=alt.Color("Série:N", title=None, scale=alt.Scale(domain=["Fundo", "CDI"],
-                                                                  range=[COR["marinho"], COR["celeste"]])),
-            tooltip=[alt.Tooltip("Data:T", format="%d/%m/%y"), "Série", alt.Tooltip("Acumulado:Q", format="+.2%")]
-        ).properties(height=165, padding={"left": 6, "right": 10, "top": 4, "bottom": 2})
-        with c2.container(border=True):
-            html_bloco(f'<div class="pn-h" style="margin:-1rem -1rem .3rem;border-radius:3px 3px 0 0">'
-                       f'<span>ACUMULADO × CDI</span><small>desde {sc["Data"].iloc[0]:%d/%m/%y}</small></div>')
+    with c2.container(border=True):
+        cab = st.empty()
+        per = st.segmented_control("Período", PERIODOS_GRAF, default="36M", key="per_acum",
+                                   label_visibility="collapsed") or "36M"
+        sc = serie_cota(M, f["chave"], int(per[:-1]))
+        if len(sc) > 5:
+            longo = sc.melt(id_vars="Data", var_name="Série", value_name="Acumulado")
+            g = alt.Chart(longo).mark_line(strokeWidth=1.6).encode(
+                x=alt.X("Data:T", title=None, axis=alt.Axis(format="%m/%y", grid=False, labelOverlap=True)),
+                y=alt.Y("Acumulado:Q", title=None, axis=alt.Axis(format="+.0%")),
+                color=alt.Color("Série:N", title=None, scale=alt.Scale(domain=["Fundo", "CDI"],
+                                                                      range=[COR["marinho"], COR["celeste"]])),
+                tooltip=[alt.Tooltip("Data:T", format="%d/%m/%y"), "Série", alt.Tooltip("Acumulado:Q", format="+.2%")]
+            ).properties(height=190, padding={"left": 6, "right": 10, "top": 4, "bottom": 2})
+            fim = sc.iloc[-1]
+            pc = fim["Fundo"] / fim["CDI"] if fim["CDI"] > 0 else np.nan
+            curto_hist = sc["Data"].iloc[0] > sc["Data"].iloc[-1] - pd.DateOffset(months=int(per[:-1]), days=-10)
+            cab.markdown(
+                f'<div class="pn-h" style="margin:-1rem -1rem .3rem;border-radius:3px 3px 0 0">'
+                f'<span>ACUMULADO × CDI</span><small>desde {sc["Data"].iloc[0]:%d/%m/%y}'
+                f'{" (início do histórico)" if curto_hist else ""} · fundo {pct(fim["Fundo"], 1)}, '
+                f'CDI {pct(fim["CDI"], 1)}{"" if pd.isna(pc) else f", {pct(pc, 0, False)} do CDI"}</small></div>',
+                unsafe_allow_html=True)
             st.altair_chart(g, width="stretch")
-    graf, res = grafico_real_previa(f["chave"], jref)
-    if graf is not None:
-        with st.container(border=True):
-            html_bloco(f'<div class="pn-h" style="margin:-1rem -1rem .4rem;border-radius:3px 3px 0 0">'
-                       f'<span>PRÉVIA × REALIZADO, FORA DA AMOSTRA</span>'
-                       f'<small>últimos {res["dias"]} dias, {rot(jref)}</small></div>')
+    with st.container(border=True):
+        cab = st.empty()
+        per = st.segmented_control("Período do backtest", ["3M", "6M", "12M", "24M", "36M"], default="3M",
+                                   key="per_bt", label_visibility="collapsed") or "3M"
+        graf, res = grafico_real_previa(f["chave"], jref, int(per[:-1]))
+        if graf is None:
+            cab.markdown('<div class="pn-h" style="margin:-1rem -1rem .4rem;border-radius:3px 3px 0 0">'
+                         '<span>PRÉVIA × REALIZADO, FORA DA AMOSTRA</span><small>sem histórico suficiente</small></div>',
+                         unsafe_allow_html=True)
+        else:
+            cab.markdown(f'<div class="pn-h" style="margin:-1rem -1rem .4rem;border-radius:3px 3px 0 0">'
+                         f'<span>PRÉVIA × REALIZADO, FORA DA AMOSTRA</span>'
+                         f'<small>últimos {res["dias"]} dias, {rot(jref)}</small></div>', unsafe_allow_html=True)
             st.altair_chart(graf, width="stretch")
             nota(f"Barras: realizado. Linha: prévia. Faixa: IC 95%. Erro médio {num(res['erro'])} bps/dia; "
                  f"realizado dentro da faixa em {pct(res['dentro'], 0, False)} dos dias.")

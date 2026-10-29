@@ -48,7 +48,7 @@ Layout de estação de trabalho, em painéis uniformes:
 - **Estratégias:** mediana, P10–P90 entre fundos e quantos sobem e caem.
 - **Maiores altas, maiores quedas e atenção** (janelas divergindo, cota atrasada, R² baixo).
 - Abas **Monitor de fundos** (tabela completa com busca, ordenação e exportação para Excel/CSV), **Fundo**
-  (modelos, sensibilidades, gráfico de prévia × realizado) e **Qualidade do modelo**.
+  (modelos, sensibilidades, acumulado × CDI em 6M, 12M, 24M ou 36M e prévia × realizado de 3M a 36M) e **Qualidade do modelo**.
 
 Logo abaixo do cabeçalho fica a **barra de controles**: estratégias, gestores, modelo de referência, R² e
 PL mínimos, **Ajustes** (α, intervalo de atualização e movimento manual dos fatores), **Atualizar preços**
